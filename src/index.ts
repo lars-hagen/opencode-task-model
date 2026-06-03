@@ -19,6 +19,13 @@ const MODELS: Record<string, string> = {
   "opus-anth": "anthropic/claude-opus-4-8",
 }
 
+// Reasoning effort, passed to the subagent as the prompt `variant`. low/medium/high
+// work on every alias; xhigh/max only resolve on opus-anth (Anthropic direct).
+// A level the target model doesn't support is silently ignored by opencode.
+const REASONING = ["default", "low", "medium", "high", "xhigh", "max"]
+
+const MODEL_ALIASES = ["inherit", ...Object.keys(MODELS)]
+
 function modelRef(alias: string) {
   const full = MODELS[alias]
   if (!full) return undefined
@@ -51,12 +58,12 @@ export default async ({ client }: any) => ({
         },
         model: {
           type: "string",
-          enum: ["inherit", "sonnet", "gpt", "opus", "opus-anth"],
+          enum: MODEL_ALIASES,
           description: "Model alias. Use 'inherit' to run on the current session model.",
         },
         reasoning: {
           type: "string",
-          enum: ["default", "low", "medium", "high", "xhigh", "max"],
+          enum: REASONING,
           description:
             "Reasoning effort. 'default' leaves it to the model; low/medium/high work everywhere; xhigh/max only on opus-anth.",
         },
