@@ -33,6 +33,7 @@ export default async ({ client }: any) => ({
         "Run a subagent on a model you choose, in the current session, no restart.",
         "Same idea as the task tool, but you pick the model per call.",
         "models: inherit (current session model), sonnet (Claude Sonnet 4.6), gpt (GPT-5.5), opus (Claude Opus 4.8 via GitHub Copilot), opus-anth (Claude Opus 4.8 via Anthropic direct).",
+        "reasoning: how hard the model thinks. default keeps the model's own default; low/medium/high all work on every alias (opus-anth also accepts xhigh/max). Ignored by non-reasoning models.",
         "Returns the subagent's final text. Runs synchronously.",
       ].join(" "),
       args: {
@@ -53,9 +54,16 @@ export default async ({ client }: any) => ({
           enum: ["inherit", "sonnet", "gpt", "opus", "opus-anth"],
           description: "Model alias. Use 'inherit' to run on the current session model.",
         },
+        reasoning: {
+          type: "string",
+          enum: ["default", "low", "medium", "high", "xhigh", "max"],
+          description:
+            "Reasoning effort. 'default' leaves it to the model; low/medium/high work everywhere; xhigh/max only on opus-anth.",
+        },
       },
       async execute(args: any, ctx: any) {
         const model = modelRef(args.model)
+        const variant = args.reasoning && args.reasoning !== "default" ? args.reasoning : undefined
         const created = await client.session.create({
           body: {
             parentID: ctx.sessionID,
@@ -70,6 +78,7 @@ export default async ({ client }: any) => ({
           body: {
             agent: args.subagent_type,
             ...(model ? { model } : {}),
+            ...(variant ? { variant } : {}),
             parts: [{ type: "text", text: args.prompt }],
           },
         })

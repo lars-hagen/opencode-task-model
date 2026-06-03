@@ -23,7 +23,7 @@ or by package spec once published to a registry/git.
 The tool signature:
 
 ```
-delegate(subagent_type, description, prompt, model)
+delegate(subagent_type, description, prompt, model, reasoning)
 ```
 
 - `subagent_type` — the subagent to run (e.g. `explore`, `general`, `review`, `design`)
@@ -35,12 +35,13 @@ delegate(subagent_type, description, prompt, model)
   - `gpt` — `github-copilot/gpt-5.5`
   - `opus` — `github-copilot/claude-opus-4.8`
   - `opus-anth` — `anthropic/claude-opus-4-8` (Anthropic direct)
+- `reasoning` — thinking effort: `default` (model's own), `low`, `medium`, `high` on every alias; `xhigh`/`max` only on `opus-anth`. Levels a model doesn't support are silently ignored.
 
 It runs synchronously and returns the subagent's final text.
 
 ## Customizing models
 
-Edit the `MODELS` registry in `src/index.ts`. Each entry maps an alias to a full `providerID/modelID` string, and the `model` arg `enum` in the tool definition.
+Edit the `MODELS` registry in `src/index.ts`. Each entry maps an alias to a full `providerID/modelID` string, and the `model` arg `enum` in the tool definition. Reasoning is passed through as the prompt `variant`, so any effort the target model exposes works without further config.
 
 ## License
 
