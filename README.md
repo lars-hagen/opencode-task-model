@@ -34,6 +34,7 @@ delegate(subagent_type, description, prompt, model)
   - `sonnet` — `github-copilot/claude-sonnet-4.6`
   - `gpt` — `github-copilot/gpt-5.5`
   - `opus` — `github-copilot/claude-opus-4.8`
+  - `opus-anth` — `anthropic/claude-opus-4-8` (Anthropic direct)
 
 It runs synchronously and returns the subagent's final text.
 

@@ -16,6 +16,7 @@ const MODELS: Record<string, string> = {
   sonnet: "github-copilot/claude-sonnet-4.6",
   gpt: "github-copilot/gpt-5.5",
   opus: "github-copilot/claude-opus-4.8",
+  "opus-anth": "anthropic/claude-opus-4-8",
 }
 
 function modelRef(alias: string) {
@@ -31,7 +32,7 @@ export default async ({ client }: any) => ({
       description: [
         "Run a subagent on a model you choose, in the current session, no restart.",
         "Same idea as the task tool, but you pick the model per call.",
-        "models: inherit (current session model), sonnet (Claude Sonnet 4.6), gpt (GPT-5.5), opus (Claude Opus 4.8).",
+        "models: inherit (current session model), sonnet (Claude Sonnet 4.6), gpt (GPT-5.5), opus (Claude Opus 4.8 via GitHub Copilot), opus-anth (Claude Opus 4.8 via Anthropic direct).",
         "Returns the subagent's final text. Runs synchronously.",
       ].join(" "),
       args: {
@@ -49,7 +50,7 @@ export default async ({ client }: any) => ({
         },
         model: {
           type: "string",
-          enum: ["inherit", "sonnet", "gpt", "opus"],
+          enum: ["inherit", "sonnet", "gpt", "opus", "opus-anth"],
           description: "Model alias. Use 'inherit' to run on the current session model.",
         },
       },
