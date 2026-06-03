@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "opencode-dynamic-delegate",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "OpenCode plugin: a `delegate` tool that runs a subagent on a model you pick per call, in the current session, without restart",
+  "keywords": [
+    "opencode",
+    "plugin",
+    "subagent",
+    "delegation"
+  ],
+  "license": "MIT",
+  "files": [
+    "src"
+  ],
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts",
+    "./server": "./src/index.ts"
+  }
+}
