@@ -68,10 +68,13 @@ async function agentModel(client: any, name: string) {
   return undefined
 }
 
-// The invoking assistant message's model + variant (the session/message this tool
-// was called from). Mirrors native reading msg.info.{modelID,providerID,variant}
-// in tool/task.ts, the value a modelless subagent inherits. Best-effort: undefined
-// on any failure or if the message isn't a resolved assistant message.
+// The invoking assistant message's model (+ variant if the API exposes it). The
+// session/message this tool was called from. Mirrors native reading
+// msg.info.{modelID,providerID,variant} in tool/task.ts, the value a modelless
+// subagent inherits. NOTE: the v1 client the plugin receives serializes modelID +
+// providerID but not variant (see AssistantMessage in the SDK types), so `variant`
+// here is best-effort and normally undefined; model inheritance is the reliable
+// part. Best-effort overall: undefined on any failure or non-assistant message.
 async function parentModelVariant(client: any, ctx: any) {
   try {
     const msg = await client.session.message({ path: { id: ctx.sessionID, messageID: ctx.messageID } })
