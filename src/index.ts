@@ -241,6 +241,17 @@ export default async ({ client }: any) => ({
                 parentID: ctx.sessionID,
                 agent: args.subagent_type,
                 title: `${args.description} (@${args.subagent_type})`,
+                // Deny nested task on the child, reproducing the piece of native's
+                // deriveSubagentSessionPermission that matters most here: since this
+                // plugin OVERRIDES task, a subagent could otherwise recursively spawn
+                // more subagents. Child session.permission layers on top of the agent's
+                // own rules (session/tools.ts), so this restricts without erasing them.
+                // The server's Session.CreateInput accepts `permission` (+ `agent`)
+                // even though the generated v1 SDK body type omits them; extra fields
+                // pass through at runtime. Native's todowrite/primary_tools denies and
+                // parent-rule inheritance are skipped: they need the subagent's internal
+                // permission ruleset, which the plugin client can't read.
+                permission: [{ permission: "task", pattern: "*", action: "deny" }],
               },
             })
             if (created.error || !created.data?.id) {
