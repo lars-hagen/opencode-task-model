@@ -1,4 +1,4 @@
-// opencode-dynamic-delegate
+// opencode-task-model
 //
 // Overrides the built-in `task` tool. opencode resolves plugin tools ahead of
 // built-ins of the same name, so the agent sees ONE task tool: native-shaped,
@@ -19,24 +19,24 @@
 // sentinels: model 'inherit', reasoning 'default', task_id '' (empty = fresh).
 
 // Reasoning effort, passed to the subagent as the prompt `variant`. low/medium/high
-// work on most models; xhigh/max only resolve on the Anthropic models.
-// A level the target model doesn't support is silently ignored by opencode.
+// (and xhigh/max where a model supports them) map to the variant; a level the target
+// model doesn't support is silently ignored by opencode. Only affects reasoning models.
 const REASONING = ["default", "low", "medium", "high", "xhigh", "max"]
 
-// explore is the fast/cheap lookup agent: small model, `variant: low` in its .md,
-// by design. An explicit `reasoning` override on the task() call beats the
+// A fast/lookup subagent (e.g. one configured with a small model and `variant: low`)
+// is cheap by design. An explicit `reasoning` override on the task() call beats the
 // subagent's own default (see createUserMessage in session/prompt.ts: input.variant
 // short-circuits the agent's configured variant entirely) — that escalation path
 // stays available on purpose, for when a real deep-dive is wanted. But it should be
-// rare and deliberate: reflexively bumping it to "medium" for an ordinarily-phrased
-// "explore thoroughly" ask has turned quick greps into 5+ minute, 50+ tool-call runs.
+// rare and deliberate: reflexively bumping reasoning for an ordinarily-phrased
+// "explore thoroughly" ask can turn quick greps into multi-minute, many-tool runs.
 // Default (reasoning omitted) always falls through to the agent's own configured
-// variant ("low"), no code-level clamp here; the discipline is enforced by the
+// variant, no code-level clamp here; the discipline is enforced by the
 // description below, not by force.
 
 // Resolve the model arg to a { providerID, modelID } ref, or undefined to inherit.
-// Takes a raw "provider/model" string (e.g. "openai/gpt-5.5") straight from
-// `opencode models`. 'inherit'/'' (or anything without a "/") falls through to inherit.
+// Takes a raw "provider/model" string as listed by `opencode models`.
+// 'inherit'/'' (or anything without a "/") falls through to inherit.
 function modelRef(value: string) {
   const v = typeof value === "string" ? value.trim() : ""
   if (!v || v === "inherit" || !v.includes("/")) return undefined
@@ -139,29 +139,89 @@ async function setRunningMetadata(client: any, ctx: any, metadata: Record<string
   }
 }
 
-export default async ({ client }: any) => ({
+// Read the caller's own opencode environment at load time so the tool description
+// reflects THEIR configured providers/models/agents instead of a hardcoded lineup
+// that goes stale and assumes paid models. modelExamples come from GET
+// /config/providers `default` (one canonical ref per configured provider);
+// anyReasoning is true if any installed model advertises reasoning capability;
+// subagents are the agents whose mode is "subagent". Best-effort: any failure
+// yields empty hints and the description degrades to generic "run 'opencode models'"
+// wording, so the tool still works on older servers or restricted setups.
+async function loadEnv(client: any) {
+  const modelExamples: string[] = []
+  let anyReasoning = false
+  try {
+    const res = await client.config.providers()
+    const data = res?.data ?? res
+    const defaults = data?.default ?? {}
+    for (const [providerID, modelID] of Object.entries(defaults)) {
+      if (providerID && typeof modelID === "string" && modelID) modelExamples.push(`${providerID}/${modelID}`)
+    }
+    for (const p of data?.providers ?? []) {
+      for (const m of Object.values(p?.models ?? {})) {
+        if ((m as any)?.capabilities?.reasoning) anyReasoning = true
+      }
+    }
+  } catch {
+    // best-effort
+  }
+  const subagents: Array<{ name: string; description?: string }> = []
+  try {
+    const res = await client.app.agents()
+    const list = res?.data ?? res
+    for (const a of Array.isArray(list) ? list : []) {
+      if (a?.name && a?.mode === "subagent") subagents.push({ name: a.name, description: a.description })
+    }
+  } catch {
+    // best-effort
+  }
+  return { modelExamples, anyReasoning, subagents }
+}
+
+// First sentence (or a short slice) of an agent description, for the inline
+// subagent list in the tool description. Keeps the enumerated list compact.
+function shortDesc(d?: string) {
+  if (typeof d !== "string") return ""
+  const s = d.trim()
+  const ends = [s.indexOf(". "), s.indexOf("\n")].filter((i) => i >= 0)
+  const cut = ends.length ? Math.min(...ends) : s.length
+  const first = s.slice(0, cut).trim()
+  return first.length > 60 ? first.slice(0, 57).trimEnd() + "..." : first
+}
+
+export default async ({ client }: any) => {
+  const env = await loadEnv(client)
+  const modelEg = env.modelExamples.slice(0, 6).join(", ")
+  const modelEg3 = env.modelExamples.slice(0, 3).join(", ")
+  const subagentList = env.subagents.length
+    ? env.subagents.map((s) => (shortDesc(s.description) ? `${s.name} (${shortDesc(s.description)})` : s.name)).join(", ")
+    : ""
+  const reasoningNote = env.anyReasoning
+    ? "Only affects models that support reasoning; unsupported values are ignored by opencode."
+    : "Only affects models that support reasoning."
+  return {
   tool: {
     task: {
       description: [
         "Launch a subagent to handle a task, optionally on a model you choose.",
         "Drop-in for the built-in task tool: same subagent_type/description/prompt/task_id,",
-        "plus an optional model + reasoning. Omit model (or use 'inherit') to run on the",
-        "current session model, exactly like the native task tool.",
-        "subagent_type: explore (codebase search), general (multi-step execution),",
-        "review (code review), design (UI/full-stack).",
-        "model: a raw 'provider/model' ref from 'opencode models', or omit/'inherit' to run on the",
-        "current session model. Common picks: anthropic/claude-sonnet-5 (sonnet),",
-        "anthropic/claude-opus-4-8 (opus), anthropic/claude-fable-5 (fable), openai/gpt-5.5 (gpt),",
-        "openai/gpt-5.4-mini (cheap/fast).",
-        "reasoning: how hard the model thinks. default keeps the model's own default;",
-        "low/medium/high work on most models (the Anthropic models also accept xhigh/max). Ignored by",
-        "non-reasoning models. For explore specifically: almost always omit this (or pass 'default') so",
-        "it stays at its configured 'low' — that's what keeps it fast and cheap. Only raise it when the",
-        "USER explicitly asks for a deeper/more careful explore pass on this specific call; do not bump",
-        "it yourself just because a search feels broad or the prompt says 'thoroughly'.",
-        "Default to leaving model at 'inherit'; reach for an explicit ref only when the job needs more",
-        "muscle (opus, or high reasoning) or a cheaper pass (gpt-5.4-mini) than the subagent's default.",
-        "If the user names a model or thinking level in plain language (e.g. 'use sonnet'), honor it.",
+        "plus an optional model + reasoning. Omit model (or use 'inherit') for native model",
+        "resolution: the subagent's own configured model if it has one, else the invoking",
+        "session's model.",
+        subagentList
+          ? `subagent_type: one of ${subagentList}.`
+          : "subagent_type: the name of a subagent configured in this environment.",
+        modelEg
+          ? `model: a raw 'provider/model' ref from 'opencode models' (e.g. ${modelEg}), or omit/'inherit' for native resolution.`
+          : "model: a raw 'provider/model' ref from 'opencode models', or omit/'inherit' for native resolution.",
+        "reasoning: how hard the model thinks. 'default' keeps the model's own default;",
+        `low/medium/high (and xhigh/max where supported) map to the prompt variant. ${reasoningNote}`,
+        "For a fast/lookup subagent configured at low reasoning, keep 'default' unless the",
+        "user explicitly asks for a deeper pass on this specific call; do not raise it",
+        "yourself just because a search feels broad or the prompt says 'thoroughly'.",
+        "Reach for an explicit model only when the job needs more capability, or a cheaper",
+        "pass, than the subagent's default. If the user names a model or thinking level in",
+        "plain language (e.g. 'use the big model'), honor it.",
         "Pass a prior task_id to resume that subagent session instead of starting fresh.",
         "Returns the subagent's final text. Runs synchronously.",
       ].join(" "),
@@ -186,15 +246,16 @@ export default async ({ client }: any) => ({
         model: {
           type: "string",
           description:
-            `Raw "provider/model" ref from 'opencode models' (e.g. "openai/gpt-5.5", ` +
-            `"anthropic/claude-sonnet-5"). Use 'inherit' (or omit) to run on the current ` +
-            `session model (native behavior).`,
+            `Raw "provider/model" ref from 'opencode models'` +
+            (modelEg3 ? ` (e.g. ${modelEg3})` : "") +
+            `. Use 'inherit' (or omit) for native resolution: the subagent's configured ` +
+            `model if it has one, else the invoking session's model.`,
         },
         reasoning: {
           type: "string",
           enum: REASONING,
           description:
-            "Reasoning effort. 'default' leaves it to the model; low/medium/high work on most models; xhigh/max only on the Anthropic models.",
+            `Reasoning effort passed to the subagent as the prompt variant. 'default' leaves it to the model. ${reasoningNote}`,
         },
       },
       async execute(args: any, ctx: any) {
@@ -282,15 +343,26 @@ export default async ({ client }: any) => ({
         // errors (route gone, child already done). If ctx.abort already fired before we
         // got here, abort immediately so we don't spawn an unstoppable run.
         const abortChild = () => {
+          // Fire-and-forget: don't await, and swallow rejection so a failed abort
+          // (route gone, child already terminal) never becomes an unhandled rejection.
           try {
-            client.session.abort({ path: { id: sessionID } })
+            void Promise.resolve(client.session.abort({ path: { id: sessionID } })).catch(() => {})
           } catch {
             // best-effort; child may already be terminal
           }
         }
         const signal: AbortSignal | undefined = ctx?.abort
-        if (signal?.aborted) abortChild()
-        else signal?.addEventListener("abort", abortChild, { once: true })
+        // Already interrupted before we could prompt: stop the child and return an
+        // error envelope instead of starting a run the user already cancelled.
+        if (signal?.aborted) {
+          abortChild()
+          return {
+            title: args.description,
+            output: renderOutput(sessionID, "error", "task: aborted before the subagent started"),
+            metadata: liveMeta,
+          }
+        }
+        signal?.addEventListener("abort", abortChild, { once: true })
 
         // On any prompt failure, still return the task-shaped object (with liveMeta
         // and a state=error envelope) so the failed task stays clickable, keeps its
@@ -343,4 +415,5 @@ export default async ({ client }: any) => ({
       },
     },
   },
-})
+  }
+}

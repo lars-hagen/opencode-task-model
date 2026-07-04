@@ -42,14 +42,16 @@ task(subagent_type, description, prompt, task_id, model, reasoning)
 - `description` — short task description, used as the child session title
 - `prompt` — full self-contained instructions for the subagent
 - `task_id` — pass a prior task_id to resume that subagent session; empty string starts fresh
-- `model` — a raw `providerID/modelID` string straight from `opencode models` (e.g. `anthropic/claude-sonnet-5`, `anthropic/claude-opus-4-8`, `anthropic/claude-fable-5`, `openai/gpt-5.5`, `openai/gpt-5.4-mini`). Omit it or pass `inherit` to reproduce native precedence: the subagent's own configured `model:` wins, and if it has none the child inherits the invoking session's current model. (Reasoning is not inherited via the plugin API surface; pass `reasoning` if you need a specific tier.)
-- `reasoning` — thinking effort: `default` (the model's own), or `low`/`medium`/`high` (most models also accept `xhigh`/`max` on the Anthropic models). A level the target model doesn't support is silently ignored by opencode.
+- `model` — a raw `providerID/modelID` string straight from `opencode models` (e.g. `<provider>/<model>`). Omit it or pass `inherit` to reproduce native precedence: the subagent's own configured `model:` wins, and if it has none the child inherits the invoking session's current model. (Reasoning is not inherited via the plugin API surface; pass `reasoning` if you need a specific tier.)
+- `reasoning` — thinking effort: `default` (the model's own), or `low`/`medium`/`high` (some models also accept `xhigh`/`max`). Only affects models that support reasoning; a level the target model doesn't support is silently ignored by opencode.
 
 It runs synchronously and returns the subagent's final text, with the child `task_id` in the result metadata for resuming.
 
 ## Picking models
 
 There's no alias table — `model` takes a raw `providerID/modelID` string, so anything `opencode models` lists works without touching the plugin. Reasoning is passed through as the prompt `variant`, so any effort tier the target model exposes works without further config.
+
+The tool description the agent sees is generated at load time from your own environment: example `provider/model` refs come from your configured providers (`/config/providers`) and the listed subagent types come from your installed agents. Nothing about the model lineup is hardcoded, so it never goes stale and makes no assumption about which providers you can afford.
 
 ## License
 
