@@ -1,18 +1,31 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
   "name": "opencode-dynamic-delegate",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "type": "module",
-  "description": "OpenCode plugin: a `delegate` tool that runs a subagent on a model you pick per call, in the current session, without restart",
+  "description": "OpenCode plugin: overrides the built-in `task` tool to run a subagent on a model you pick per call, in the current session, without restart",
   "keywords": [
     "opencode",
+    "opencode-plugin",
     "plugin",
     "subagent",
-    "delegation"
+    "delegation",
+    "task"
   ],
   "license": "MIT",
+  "author": "Lars Hagen <larsh2690@hotmail.com>",
+  "homepage": "https://github.com/lars-hagen/opencode-dynamic-delegate#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lars-hagen/opencode-dynamic-delegate.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lars-hagen/opencode-dynamic-delegate/issues"
+  },
   "files": [
-    "src"
+    "src",
+    "README.md",
+    "LICENSE"
   ],
   "sideEffects": false,
   "exports": {

@@ -10,15 +10,25 @@ The built-in `task` tool resolves the subagent model from the agent's frozen con
 
 ## Install
 
-Reference the plugin from the `plugin` array in your `opencode.json`:
+Add the package to the `plugin` array in your `opencode.json`. opencode installs it with Bun on startup and caches it under `~/.cache/opencode/node_modules/`:
 
 ```json
 {
-  "plugin": ["./plugins/opencode-dynamic-delegate"]
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["opencode-dynamic-delegate"]
 }
 ```
 
-or by package spec once published to a registry/git.
+Because it overrides the built-in `task` tool, no further wiring is needed: every agent that already uses `task` picks up the `model`/`reasoning` args automatically.
+
+### Local development
+
+To hack on it, clone the repo into a plugin directory opencode auto-loads (`~/.config/opencode/plugins/` for global, `.opencode/plugins/` for a project) and it loads on the next start:
+
+```sh
+git clone https://github.com/lars-hagen/opencode-dynamic-delegate.git \
+  ~/.config/opencode/plugins/opencode-dynamic-delegate
+```
 
 ## Usage
 
