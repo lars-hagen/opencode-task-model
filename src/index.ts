@@ -50,6 +50,44 @@ function errMsg(e: unknown) {
   return e instanceof Error ? e.message : String(e)
 }
 
+// The subagent's own configured model (its .md / config `model:`), or undefined.
+// Mirrors native `next.model` in tool/task.ts: when set, it wins over inheriting
+// the parent's model. Best-effort GET /agent via client.app.agents(); any failure
+// (route gone, SDK shape change) returns undefined so the caller falls through to
+// parent-model inherit, i.e. the pre-fix behavior.
+async function agentModel(client: any, name: string) {
+  try {
+    const res = await client.app.agents()
+    const list = res?.data ?? res
+    const found = (Array.isArray(list) ? list : []).find((a: any) => a?.name === name)
+    const m = found?.model
+    if (m?.providerID && m?.modelID) return { providerID: m.providerID, modelID: m.modelID }
+  } catch {
+    // best-effort
+  }
+  return undefined
+}
+
+// The invoking assistant message's model + variant (the session/message this tool
+// was called from). Mirrors native reading msg.info.{modelID,providerID,variant}
+// in tool/task.ts, the value a modelless subagent inherits. Best-effort: undefined
+// on any failure or if the message isn't a resolved assistant message.
+async function parentModelVariant(client: any, ctx: any) {
+  try {
+    const msg = await client.session.message({ path: { id: ctx.sessionID, messageID: ctx.messageID } })
+    const info = msg?.data?.info
+    if (info?.role === "assistant" && info.providerID && info.modelID) {
+      return {
+        model: { providerID: info.providerID, modelID: info.modelID },
+        variant: typeof info.variant === "string" ? info.variant : undefined,
+      }
+    }
+  } catch {
+    // best-effort
+  }
+  return undefined
+}
+
 // Mirror the built-in task tool's output envelope. The model sees the tool OUTPUT
 // string but not its metadata, so the child session id must live in the text for
 // `task_id` resume to be usable. Matches packages/opencode/src/tool/task.ts.
@@ -157,8 +195,28 @@ export default async ({ client }: any) => ({
         },
       },
       async execute(args: any, ctx: any) {
-        const model = modelRef(args.model)
-        const variant = args.reasoning && args.reasoning !== "default" ? args.reasoning : undefined
+        // Reproduce native task's model precedence (tool/task.ts): when the caller
+        // gives no explicit model, the subagent's own configured model wins, else the
+        // child inherits the INVOKING assistant message's model (not the child
+        // session's default, which a fresh child would otherwise resolve to). Variant
+        // follows the parent only in the inherit case, matching native
+        // `variant: next.model ? undefined : parentVariant`. An explicit model/reasoning
+        // arg overrides both. All lookups are best-effort: on failure we leave model
+        // undefined and let the server resolve it, the pre-fix fallback.
+        let model = modelRef(args.model)
+        let variant = args.reasoning && args.reasoning !== "default" ? args.reasoning : undefined
+        if (!model) {
+          const configured = await agentModel(client, args.subagent_type)
+          if (configured) {
+            model = configured
+          } else {
+            const parent = await parentModelVariant(client, ctx)
+            if (parent) {
+              model = parent.model
+              if (!variant) variant = parent.variant
+            }
+          }
+        }
 
         // Resolve the child session: resume a VALID prior task_id, else create fresh.
         // Matches native behavior (tool/task.ts): an unknown/stale/deleted task_id
@@ -178,6 +236,7 @@ export default async ({ client }: any) => ({
             const created = await client.session.create({
               body: {
                 parentID: ctx.sessionID,
+                agent: args.subagent_type,
                 title: `${args.description} (@${args.subagent_type})`,
               },
             })
@@ -251,12 +310,12 @@ export default async ({ client }: any) => ({
             metadata: liveMeta,
           }
         }
+        // Native returns only the LAST text part of the child result (tool/task.ts:
+        // result.parts.findLast(text)), not every text part joined; joining can
+        // duplicate or interleave intermediate assistant text.
         const parts = res.data?.parts ?? []
-        const text = parts
-          .filter((p: any) => p.type === "text" && typeof p.text === "string")
-          .map((p: any) => p.text)
-          .join("\n")
-          .trim()
+        const last = parts.filter((p: any) => p.type === "text" && typeof p.text === "string").pop()
+        const text = (last?.text ?? "").trim()
 
         // Metadata keys MUST be camelCase sessionId/parentSessionId: the TUI Task
         // renderer keys its child-session sync, clickable navigation, toolcall count
