@@ -18,25 +18,84 @@
 // legacy arg-schema path marks every arg required, so the "optional" args use
 // sentinels: model 'inherit', reasoning 'default', task_id '' (empty = fresh).
 
-const MODELS: Record<string, string> = {
-  sonnet: "github-copilot/claude-sonnet-4.6",
-  gpt: "github-copilot/gpt-5.5",
-  opus: "github-copilot/claude-opus-4.8",
-  "opus-anth": "anthropic/claude-opus-4-8",
-}
-
 // Reasoning effort, passed to the subagent as the prompt `variant`. low/medium/high
-// work on every alias; xhigh/max only resolve on opus-anth (Anthropic direct).
+// work on most models; xhigh/max only resolve on the Anthropic models.
 // A level the target model doesn't support is silently ignored by opencode.
 const REASONING = ["default", "low", "medium", "high", "xhigh", "max"]
 
-const MODEL_ALIASES = ["inherit", ...Object.keys(MODELS)]
+// explore is the fast/cheap lookup agent: small model, `variant: low` in its .md,
+// by design. An explicit `reasoning` override on the task() call beats the
+// subagent's own default (see createUserMessage in session/prompt.ts: input.variant
+// short-circuits the agent's configured variant entirely) — that escalation path
+// stays available on purpose, for when a real deep-dive is wanted. But it should be
+// rare and deliberate: reflexively bumping it to "medium" for an ordinarily-phrased
+// "explore thoroughly" ask has turned quick greps into 5+ minute, 50+ tool-call runs.
+// Default (reasoning omitted) always falls through to the agent's own configured
+// variant ("low"), no code-level clamp here; the discipline is enforced by the
+// description below, not by force.
 
-function modelRef(alias: string) {
-  const full = MODELS[alias]
-  if (!full) return undefined
-  const [providerID, ...rest] = full.split("/")
-  return { providerID, modelID: rest.join("/") }
+// Resolve the model arg to a { providerID, modelID } ref, or undefined to inherit.
+// Takes a raw "provider/model" string (e.g. "openai/gpt-5.5") straight from
+// `opencode models`. 'inherit'/'' (or anything without a "/") falls through to inherit.
+function modelRef(value: string) {
+  const v = typeof value === "string" ? value.trim() : ""
+  if (!v || v === "inherit" || !v.includes("/")) return undefined
+  const [providerID, ...rest] = v.split("/")
+  const modelID = rest.join("/").trim()
+  if (!providerID.trim() || !modelID) return undefined
+  return { providerID: providerID.trim(), modelID }
+}
+
+function errMsg(e: unknown) {
+  return e instanceof Error ? e.message : String(e)
+}
+
+// Mirror the built-in task tool's output envelope. The model sees the tool OUTPUT
+// string but not its metadata, so the child session id must live in the text for
+// `task_id` resume to be usable. Matches packages/opencode/src/tool/task.ts.
+function renderOutput(sessionID: string, state: "completed" | "error", text: string) {
+  const tag = state === "error" ? "task_error" : "task_result"
+  return [`<task id="${sessionID}" state="${state}">`, `<${tag}>`, text, `</${tag}>`, "</task>"].join("\n")
+}
+
+// Set this tool part's metadata.sessionId WHILE the subagent runs, so the TUI Task
+// renderer (routes/session/index.tsx) lights up its live "running" branch: child
+// sync, clickable nav, and the streaming current-tool line. The built-in task tool
+// does this via ctx.metadata() early, but that callback is a lazy Effect that
+// opencode does NOT bridge for plugin tools (registry.ts only bridges `ask`), so a
+// plugin calling ctx.metadata() is a no-op. We instead PATCH the part directly:
+// fetch the parent message, find this tool call by ctx.callID, and write metadata
+// via the PATCH /session/{id}/message/{messageID}/part/{partID} route, reached
+// through the legacy client's protected `_client`. Best-effort: any failure (route
+// gone, callID/messageID absent, _client shape change) degrades to completion-only
+// metadata, which still gives clickable + duration + toolcount once the task ends.
+async function setRunningMetadata(client: any, ctx: any, metadata: Record<string, any>, title?: string) {
+  try {
+    const sessionID = ctx?.sessionID
+    const messageID = ctx?.messageID
+    const callID = ctx?.callID
+    const http = client?._client
+    if (!sessionID || !messageID || !callID || typeof http?.patch !== "function") return
+
+    const msg = await client.session.message({ path: { id: sessionID, messageID } })
+    const part = (msg?.data?.parts ?? []).find((p: any) => p.type === "tool" && p.callID === callID)
+    if (!part || part.state?.status !== "running") return
+
+    const next = {
+      ...part,
+      state: {
+        ...part.state,
+        ...(title ? { title } : {}),
+        metadata: { ...(part.state.metadata ?? {}), ...metadata },
+      },
+    }
+    await http.patch({
+      url: `/session/${sessionID}/message/${messageID}/part/${part.id}`,
+      body: next,
+    })
+  } catch {
+    // best-effort; completion-time metadata is the source of truth
+  }
 }
 
 export default async ({ client }: any) => ({
@@ -49,11 +108,19 @@ export default async ({ client }: any) => ({
         "current session model, exactly like the native task tool.",
         "subagent_type: explore (codebase search), general (multi-step execution),",
         "review (code review), design (UI/full-stack).",
-        "models: inherit (current session model), sonnet (Claude Sonnet 4.6), gpt (GPT-5.5),",
-        "opus (Claude Opus 4.8 via GitHub Copilot), opus-anth (Claude Opus 4.8 via Anthropic direct).",
+        "model: a raw 'provider/model' ref from 'opencode models', or omit/'inherit' to run on the",
+        "current session model. Common picks: anthropic/claude-sonnet-5 (sonnet),",
+        "anthropic/claude-opus-4-8 (opus), anthropic/claude-fable-5 (fable), openai/gpt-5.5 (gpt),",
+        "openai/gpt-5.4-mini (cheap/fast).",
         "reasoning: how hard the model thinks. default keeps the model's own default;",
-        "low/medium/high work on every alias (opus-anth also accepts xhigh/max). Ignored by",
-        "non-reasoning models. Note: Copilot 'opus' only supports 'medium' (or 'default').",
+        "low/medium/high work on most models (the Anthropic models also accept xhigh/max). Ignored by",
+        "non-reasoning models. For explore specifically: almost always omit this (or pass 'default') so",
+        "it stays at its configured 'low' — that's what keeps it fast and cheap. Only raise it when the",
+        "USER explicitly asks for a deeper/more careful explore pass on this specific call; do not bump",
+        "it yourself just because a search feels broad or the prompt says 'thoroughly'.",
+        "Default to leaving model at 'inherit'; reach for an explicit ref only when the job needs more",
+        "muscle (opus, or high reasoning) or a cheaper pass (gpt-5.4-mini) than the subagent's default.",
+        "If the user names a model or thinking level in plain language (e.g. 'use sonnet'), honor it.",
         "Pass a prior task_id to resume that subagent session instead of starting fresh.",
         "Returns the subagent's final text. Runs synchronously.",
       ].join(" "),
@@ -77,45 +144,112 @@ export default async ({ client }: any) => ({
         },
         model: {
           type: "string",
-          enum: MODEL_ALIASES,
-          description: "Model alias. Use 'inherit' to run on the current session model (native behavior).",
+          description:
+            `Raw "provider/model" ref from 'opencode models' (e.g. "openai/gpt-5.5", ` +
+            `"anthropic/claude-sonnet-5"). Use 'inherit' (or omit) to run on the current ` +
+            `session model (native behavior).`,
         },
         reasoning: {
           type: "string",
           enum: REASONING,
           description:
-            "Reasoning effort. 'default' leaves it to the model; low/medium/high work everywhere; xhigh/max only on opus-anth.",
+            "Reasoning effort. 'default' leaves it to the model; low/medium/high work on most models; xhigh/max only on the Anthropic models.",
         },
       },
       async execute(args: any, ctx: any) {
         const model = modelRef(args.model)
         const variant = args.reasoning && args.reasoning !== "default" ? args.reasoning : undefined
 
-        let sessionID = typeof args.task_id === "string" && args.task_id ? args.task_id : undefined
-        if (!sessionID) {
-          const created = await client.session.create({
-            body: {
-              parentID: ctx.sessionID,
-              title: `${args.description} (@${args.subagent_type})`,
-            },
-          })
-          if (created.error || !created.data?.id) {
-            return `task: failed to create session: ${JSON.stringify(created.error ?? "unknown")}`
+        // Resolve the child session: resume a VALID prior task_id, else create fresh.
+        // Matches native behavior (tool/task.ts): an unknown/stale/deleted task_id
+        // falls back to a new session rather than hard-failing the prompt.
+        let sessionID: string | undefined
+        const candidate = typeof args.task_id === "string" && args.task_id.trim() ? args.task_id.trim() : undefined
+        if (candidate) {
+          try {
+            const existing = await client.session.get({ path: { id: candidate } })
+            if (!existing.error && existing.data?.id) sessionID = existing.data.id
+          } catch {
+            // unresolved candidate; fall through to create
           }
-          sessionID = created.data.id
+        }
+        if (!sessionID) {
+          try {
+            const created = await client.session.create({
+              body: {
+                parentID: ctx.sessionID,
+                title: `${args.description} (@${args.subagent_type})`,
+              },
+            })
+            if (created.error || !created.data?.id) {
+              return `task: failed to create session: ${JSON.stringify(created.error ?? "unknown")}`
+            }
+            sessionID = created.data.id
+          } catch (e) {
+            return `task: failed to create session: ${errMsg(e)}`
+          }
         }
 
-        const res = await client.session.prompt({
-          path: { id: sessionID },
-          body: {
-            agent: args.subagent_type,
-            ...(model ? { model } : {}),
-            ...(variant ? { variant } : {}),
-            parts: [{ type: "text", text: args.prompt }],
-          },
-        })
+        // Light up the live TUI branch before the (blocking) prompt call. Guarded;
+        // no-ops on older servers. Completion metadata below is the durable record.
+        const liveMeta = {
+          sessionId: sessionID,
+          parentSessionId: ctx.sessionID,
+          ...(model ? { model } : {}),
+        }
+        await setRunningMetadata(client, ctx, liveMeta, args.description)
+
+        // Propagate interrupt to the child. ctx.abort fires when the user interrupts
+        // the parent session, but client.session.prompt is a blocking HTTP call that
+        // keeps the child running SERVER-SIDE; nothing here cancels it. Passing
+        // ctx.abort as a local fetch signal would only kill our wait and leak a live
+        // child. So on abort we hit the child's own /session/{id}/abort, which stops
+        // its run and lets the pending prompt return. once:true + finally cleanup so a
+        // resolved prompt never leaves a dangling listener. Best-effort: swallow abort
+        // errors (route gone, child already done). If ctx.abort already fired before we
+        // got here, abort immediately so we don't spawn an unstoppable run.
+        const abortChild = () => {
+          try {
+            client.session.abort({ path: { id: sessionID } })
+          } catch {
+            // best-effort; child may already be terminal
+          }
+        }
+        const signal: AbortSignal | undefined = ctx?.abort
+        if (signal?.aborted) abortChild()
+        else signal?.addEventListener("abort", abortChild, { once: true })
+
+        // On any prompt failure, still return the task-shaped object (with liveMeta
+        // and a state=error envelope) so the failed task stays clickable, keeps its
+        // sessionId for resume, and surfaces the error to the model.
+        let res: any
+        try {
+          res = await client.session.prompt({
+            path: { id: sessionID },
+            body: {
+              agent: args.subagent_type,
+              ...(model ? { model } : {}),
+              ...(variant ? { variant } : {}),
+              parts: [{ type: "text", text: args.prompt }],
+            },
+          })
+        } catch (e) {
+          return {
+            title: args.description,
+            output: renderOutput(sessionID, "error", `task: subagent threw: ${errMsg(e)}`),
+            metadata: liveMeta,
+          }
+        } finally {
+          // Drop the abort listener on every exit (throw, error, success) so a
+          // resolved task never leaves a stale handler bound to ctx.abort.
+          signal?.removeEventListener("abort", abortChild)
+        }
         if (res.error) {
-          return `task: subagent error: ${JSON.stringify(res.error)}`
+          return {
+            title: args.description,
+            output: renderOutput(sessionID, "error", `task: subagent error: ${JSON.stringify(res.error)}`),
+            metadata: liveMeta,
+          }
         }
         const parts = res.data?.parts ?? []
         const text = parts
@@ -124,10 +258,14 @@ export default async ({ client }: any) => ({
           .join("\n")
           .trim()
 
+        // Metadata keys MUST be camelCase sessionId/parentSessionId: the TUI Task
+        // renderer keys its child-session sync, clickable navigation, toolcall count
+        // and duration off props.metadata.sessionId (see routes/session/index.tsx).
+        // model mirrors the built-in's { providerID, modelID } shape when known.
         return {
-          title: `${args.description} (@${args.subagent_type})`,
-          output: text || "(subagent returned no text)",
-          metadata: { task_id: sessionID, model: args.model || "inherit" },
+          title: args.description,
+          output: renderOutput(sessionID, "completed", text || "(subagent returned no text)"),
+          metadata: liveMeta,
         }
       },
     },

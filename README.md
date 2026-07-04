@@ -32,19 +32,14 @@ task(subagent_type, description, prompt, task_id, model, reasoning)
 - `description` — short task description, used as the child session title
 - `prompt` — full self-contained instructions for the subagent
 - `task_id` — pass a prior task_id to resume that subagent session; empty string starts fresh
-- `model` — one of:
-  - `inherit` — the subagent's configured model (native behavior)
-  - `sonnet` — `github-copilot/claude-sonnet-4.6`
-  - `gpt` — `github-copilot/gpt-5.5`
-  - `opus` — `github-copilot/claude-opus-4.8` (only supports `medium`/`default` reasoning on Copilot)
-  - `opus-anth` — `anthropic/claude-opus-4-8` (Anthropic direct)
-- `reasoning` — thinking effort: `default` (model's own), `low`, `medium`, `high` on every alias; `xhigh`/`max` only on `opus-anth`. Levels a model doesn't support are silently ignored by opencode (except Copilot `opus`, which 400s on anything but `medium`).
+- `model` — a raw `providerID/modelID` string straight from `opencode models` (e.g. `anthropic/claude-sonnet-5`, `anthropic/claude-opus-4-8`, `anthropic/claude-fable-5`, `openai/gpt-5.5`, `openai/gpt-5.4-mini`). Omit it or pass `inherit` to run on the subagent's own configured model (native behavior).
+- `reasoning` — thinking effort: `default` (the model's own), or `low`/`medium`/`high` (most models also accept `xhigh`/`max` on the Anthropic models). A level the target model doesn't support is silently ignored by opencode.
 
 It runs synchronously and returns the subagent's final text, with the child `task_id` in the result metadata for resuming.
 
-## Customizing models
+## Picking models
 
-Edit the `MODELS` registry in `src/index.ts`. Each entry maps an alias to a full `providerID/modelID` string and feeds the `model` arg `enum`. Reasoning is passed through as the prompt `variant`, so any effort the target model exposes works without further config.
+There's no alias table — `model` takes a raw `providerID/modelID` string, so anything `opencode models` lists works without touching the plugin. Reasoning is passed through as the prompt `variant`, so any effort tier the target model exposes works without further config.
 
 ## License
 
