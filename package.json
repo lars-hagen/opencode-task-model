@@ -1,6 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
-  "name": "opencode-dynamic-delegate",
+  "name": "opencode-task-model",
   "version": "1.0.0",
   "type": "module",
   "description": "OpenCode plugin: overrides the built-in `task` tool to run a subagent on a model you pick per call, in the current session, without restart",
@@ -9,18 +9,18 @@
     "opencode-plugin",
     "plugin",
     "subagent",
-    "delegation",
-    "task"
+    "task",
+    "model-selection"
   ],
   "license": "MIT",
   "author": "Lars Hagen <larsh2690@hotmail.com>",
-  "homepage": "https://github.com/lars-hagen/opencode-dynamic-delegate#readme",
+  "homepage": "https://github.com/lars-hagen/opencode-task-model#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/lars-hagen/opencode-dynamic-delegate.git"
+    "url": "git+https://github.com/lars-hagen/opencode-task-model.git"
   },
   "bugs": {
-    "url": "https://github.com/lars-hagen/opencode-dynamic-delegate/issues"
+    "url": "https://github.com/lars-hagen/opencode-task-model/issues"
   },
   "files": [
     "src",

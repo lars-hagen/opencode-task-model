@@ -1,4 +1,4 @@
-# opencode-dynamic-delegate
+# opencode-task-model
 
 An [opencode](https://opencode.ai) plugin that **overrides the built-in `task` tool** so you can run a subagent on a model you choose **per call**, in the current session, without restarting opencode or hardcoding `model:` in each agent's `.md`.
 
@@ -15,7 +15,7 @@ Add the package to the `plugin` array in your `opencode.json`. opencode installs
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-dynamic-delegate"]
+  "plugin": ["opencode-task-model"]
 }
 ```
 
@@ -26,8 +26,8 @@ Because it overrides the built-in `task` tool, no further wiring is needed: ever
 To hack on it, clone the repo into a plugin directory opencode auto-loads (`~/.config/opencode/plugins/` for global, `.opencode/plugins/` for a project) and it loads on the next start:
 
 ```sh
-git clone https://github.com/lars-hagen/opencode-dynamic-delegate.git \
-  ~/.config/opencode/plugins/opencode-dynamic-delegate
+git clone https://github.com/lars-hagen/opencode-task-model.git \
+  ~/.config/opencode/plugins/opencode-task-model
 ```
 
 ## Usage
