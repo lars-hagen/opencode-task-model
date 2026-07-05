@@ -53,6 +53,17 @@ There's no alias table — `model` takes a raw `providerID/modelID` string, so a
 
 The tool description the agent sees is generated at load time from your own environment: example `provider/model` refs come from your configured providers (`/config/providers`) and the listed subagent types come from your installed agents. Nothing about the model lineup is hardcoded, so it never goes stale and makes no assumption about which providers you can afford.
 
+## Releasing
+
+Publishing to npm is tag-driven only, via `.github/workflows/publish.yml` — there's no manual `npm publish` step. To cut a release: bump `version` in `package.json`, commit it, then tag and push:
+
+```sh
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
+
+The workflow verifies the tag matches `package.json`'s version, publishes via npm's OIDC trusted publishing (no stored token), and mirrors the tag as a GitHub Release. This keeps git and npm from drifting apart: a version can only reach the registry if it has a corresponding tag/commit in this repo.
+
 ## License
 
 MIT

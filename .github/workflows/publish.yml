@@ -1,0 +1,59 @@
+name: Publish
+
+# Publish is triggered ONLY by a version tag push, never by hand. That's the
+# whole point: npm and git cannot drift apart if a tag is the sole path to a
+# release. Tag vX.Y.Z, push it, this workflow verifies it matches
+# package.json's version, then publishes (skipping if that version is somehow
+# already on the registry) and mirrors it as a GitHub Release.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+  id-token: write # required for npm OIDC trusted publishing (no NPM_TOKEN secret)
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Use a recent npm (OIDC trusted publishing needs npm >= 11.5.1)
+        run: npm install -g npm@latest
+
+      - name: Verify tag matches package.json version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          pkg_version="$(node -p "require('./package.json').version")"
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "::error::Tag v$tag_version does not match package.json version $pkg_version"
+            exit 1
+          fi
+
+      - name: Check if this version is already published
+        id: check
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if npm view "opencode-task-model@$version" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to npm
+        if: steps.check.outputs.published == 'false'
+        run: npm publish --provenance --access public
+
+      - name: Create GitHub release
+        if: steps.check.outputs.published == 'false'
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
