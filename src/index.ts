@@ -189,42 +189,47 @@ function shortDesc(d?: string) {
   return first.length > 60 ? first.slice(0, 57).trimEnd() + "..." : first
 }
 
-export default async ({ client }: any) => {
-  const env = await loadEnv(client)
-  const modelEg = env.modelExamples.slice(0, 6).join(", ")
-  const modelEg3 = env.modelExamples.slice(0, 3).join(", ")
-  const subagentList = env.subagents.length
-    ? env.subagents.map((s) => (shortDesc(s.description) ? `${s.name} (${shortDesc(s.description)})` : s.name)).join(", ")
-    : ""
-  const reasoningNote = env.anyReasoning
-    ? "Only affects models that support reasoning; unsupported values are ignored by opencode."
-    : "Only affects models that support reasoning."
+export default ({ client }: any) => {
+  // === Lazy env cache ========================================================
+  // loadEnv() makes HTTP calls to the opencode server (config.providers, app.agents).
+  // These MUST NOT run during plugin init: opencode awaits every plugin init during
+  // server startup, and the client may use in-process fetch (line 146 of plugin/index.ts),
+  // so an HTTP call here deadlocks the startup → black screen hang.
+  // Instead we cache lazily on first tool execute, when the server is fully up.
+  let envCache: Awaited<ReturnType<typeof loadEnv>> | undefined
+  async function getEnv() {
+    if (!envCache) envCache = await loadEnv(client)
+    return envCache
+  }
+
+  // Build the description without live data; the model-specific hints are nice
+  // but not worth a deadlock. The tool still works; models/agents are resolved at
+  // execute time, which is the part that matters.
+  const baseDescription = [
+    "Launch a subagent to handle a task, optionally on a model you choose.",
+    "Drop-in for the built-in task tool: same subagent_type/description/prompt/task_id,",
+    "plus an optional model + reasoning. Omit model (or use 'inherit') for native model",
+    "resolution: the subagent's own configured model if it has one, else the invoking",
+    "session's model.",
+    "subagent_type: the name of a subagent configured in this environment.",
+    "model: a raw 'provider/model' ref from 'opencode models', or omit/'inherit' for native resolution.",
+    "reasoning: how hard the model thinks. 'default' keeps the model's own default;",
+    "low/medium/high (and xhigh/max where supported) map to the prompt variant.",
+    "Only affects models that support reasoning; unsupported values are ignored by opencode.",
+    "For a fast/lookup subagent configured at low reasoning, keep 'default' unless the",
+    "user explicitly asks for a deeper pass on this specific call; do not raise it",
+    "yourself just because a search feels broad or the prompt says 'thoroughly'.",
+    "Reach for an explicit model only when the job needs more capability, or a cheaper",
+    "pass, than the subagent's default. If the user names a model or thinking level in",
+    "plain language (e.g. 'use the big model'), honor it.",
+    "Pass a prior task_id to resume that subagent session instead of starting fresh.",
+    "Returns the subagent's final text. Runs synchronously.",
+  ].join(" ")
+
   return {
   tool: {
     task: {
-      description: [
-        "Launch a subagent to handle a task, optionally on a model you choose.",
-        "Drop-in for the built-in task tool: same subagent_type/description/prompt/task_id,",
-        "plus an optional model + reasoning. Omit model (or use 'inherit') for native model",
-        "resolution: the subagent's own configured model if it has one, else the invoking",
-        "session's model.",
-        subagentList
-          ? `subagent_type: one of ${subagentList}.`
-          : "subagent_type: the name of a subagent configured in this environment.",
-        modelEg
-          ? `model: a raw 'provider/model' ref from 'opencode models' (e.g. ${modelEg}), or omit/'inherit' for native resolution.`
-          : "model: a raw 'provider/model' ref from 'opencode models', or omit/'inherit' for native resolution.",
-        "reasoning: how hard the model thinks. 'default' keeps the model's own default;",
-        `low/medium/high (and xhigh/max where supported) map to the prompt variant. ${reasoningNote}`,
-        "For a fast/lookup subagent configured at low reasoning, keep 'default' unless the",
-        "user explicitly asks for a deeper pass on this specific call; do not raise it",
-        "yourself just because a search feels broad or the prompt says 'thoroughly'.",
-        "Reach for an explicit model only when the job needs more capability, or a cheaper",
-        "pass, than the subagent's default. If the user names a model or thinking level in",
-        "plain language (e.g. 'use the big model'), honor it.",
-        "Pass a prior task_id to resume that subagent session instead of starting fresh.",
-        "Returns the subagent's final text. Runs synchronously.",
-      ].join(" "),
+      description: baseDescription,
       args: {
         subagent_type: {
           type: "string",
@@ -246,19 +251,22 @@ export default async ({ client }: any) => {
         model: {
           type: "string",
           description:
-            `Raw "provider/model" ref from 'opencode models'` +
-            (modelEg3 ? ` (e.g. ${modelEg3})` : "") +
-            `. Use 'inherit' (or omit) for native resolution: the subagent's configured ` +
-            `model if it has one, else the invoking session's model.`,
+            "Raw \"provider/model\" ref from 'opencode models'. Use 'inherit' (or omit) for native resolution: " +
+            "the subagent's configured model if it has one, else the invoking session's model.",
         },
         reasoning: {
           type: "string",
           enum: REASONING,
           description:
-            `Reasoning effort passed to the subagent as the prompt variant. 'default' leaves it to the model. ${reasoningNote}`,
+            "Reasoning effort passed to the subagent as the prompt variant. 'default' leaves it to the model. " +
+            "Only affects models that support reasoning; unsupported values are ignored by opencode.",
         },
       },
       async execute(args: any, ctx: any) {
+        // Warm the env cache on first execute (server is fully up now).
+        // Best-effort: if it fails, we just don't get the enriched hints.
+        await getEnv()
+
         // Reproduce native task's model precedence (tool/task.ts): when the caller
         // gives no explicit model, the subagent's own configured model wins, else the
         // child inherits the INVOKING assistant message's model (not the child
