@@ -3,7 +3,7 @@
   "name": "opencode-task-model",
   "version": "1.1.2",
   "type": "module",
-  "description": "OpenCode plugin: overrides the built-in `task` tool to run a subagent on a model you pick per call, in the current session, without restart",
+  "description": "OpenCode plugin: overrides the built-in `task` tool to run a subagent on a different model or reasoning effort per call",
   "keywords": [
     "opencode",
     "opencode-plugin",
