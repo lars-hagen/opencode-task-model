@@ -10,7 +10,11 @@ The built-in `task` tool resolves the subagent model from the agent's frozen con
 
 ## Install
 
-Add the package to the `plugin` array in your `opencode.json`. opencode installs it with Bun on startup and caches it under `~/.cache/opencode/node_modules/`:
+```sh
+opencode plugin opencode-task-model
+```
+
+This installs the package and adds it to your `opencode.json`'s `plugin` array for you. Or add it by hand:
 
 ```json
 {
@@ -19,7 +23,7 @@ Add the package to the `plugin` array in your `opencode.json`. opencode installs
 }
 ```
 
-Because it overrides the built-in `task` tool, no further wiring is needed: every agent that already uses `task` picks up the `model`/`reasoning` args automatically.
+Either way, opencode installs it with Bun on startup and caches it under `~/.cache/opencode/node_modules/`. Because it overrides the built-in `task` tool, no further wiring is needed: every agent that already uses `task` picks up the `model`/`reasoning` args automatically.
 
 ### Local development
 
