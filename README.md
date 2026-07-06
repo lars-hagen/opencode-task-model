@@ -11,15 +11,15 @@ The built-in `task` tool resolves the subagent model from the agent's frozen con
 ## Install
 
 ```sh
-opencode plugin opencode-task-model
+opencode plugin --global opencode-task-model@latest
 ```
 
-This installs the package and adds it to your `opencode.json`'s `plugin` array for you. Or add it by hand:
+This installs the package and adds it to your global `opencode.json`'s `plugin` array for you. `--global` puts it in your user config so every project picks it up; drop it to install into the current project only. `@latest` tracks the newest release instead of freezing the version at install time. Or add it by hand:
 
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-task-model"]
+  "plugin": ["opencode-task-model@latest"]
 }
 ```
 
