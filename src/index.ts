@@ -139,72 +139,12 @@ async function setRunningMetadata(client: any, ctx: any, metadata: Record<string
   }
 }
 
-// Read the caller's own opencode environment at load time so the tool description
-// reflects THEIR configured providers/models/agents instead of a hardcoded lineup
-// that goes stale and assumes paid models. modelExamples come from GET
-// /config/providers `default` (one canonical ref per configured provider);
-// anyReasoning is true if any installed model advertises reasoning capability;
-// subagents are the agents whose mode is "subagent". Best-effort: any failure
-// yields empty hints and the description degrades to generic "run 'opencode models'"
-// wording, so the tool still works on older servers or restricted setups.
-async function loadEnv(client: any) {
-  const modelExamples: string[] = []
-  let anyReasoning = false
-  try {
-    const res = await client.config.providers()
-    const data = res?.data ?? res
-    const defaults = data?.default ?? {}
-    for (const [providerID, modelID] of Object.entries(defaults)) {
-      if (providerID && typeof modelID === "string" && modelID) modelExamples.push(`${providerID}/${modelID}`)
-    }
-    for (const p of data?.providers ?? []) {
-      for (const m of Object.values(p?.models ?? {})) {
-        if ((m as any)?.capabilities?.reasoning) anyReasoning = true
-      }
-    }
-  } catch {
-    // best-effort
-  }
-  const subagents: Array<{ name: string; description?: string }> = []
-  try {
-    const res = await client.app.agents()
-    const list = res?.data ?? res
-    for (const a of Array.isArray(list) ? list : []) {
-      if (a?.name && a?.mode === "subagent") subagents.push({ name: a.name, description: a.description })
-    }
-  } catch {
-    // best-effort
-  }
-  return { modelExamples, anyReasoning, subagents }
-}
-
-// First sentence (or a short slice) of an agent description, for the inline
-// subagent list in the tool description. Keeps the enumerated list compact.
-function shortDesc(d?: string) {
-  if (typeof d !== "string") return ""
-  const s = d.trim()
-  const ends = [s.indexOf(". "), s.indexOf("\n")].filter((i) => i >= 0)
-  const cut = ends.length ? Math.min(...ends) : s.length
-  const first = s.slice(0, cut).trim()
-  return first.length > 60 ? first.slice(0, 57).trimEnd() + "..." : first
-}
-
 export default ({ client }: any) => {
-  // === Lazy env cache ========================================================
-  // loadEnv() makes HTTP calls to the opencode server (config.providers, app.agents).
-  // These MUST NOT run during plugin init: opencode awaits every plugin init during
-  // server startup, and the client may use in-process fetch (line 146 of plugin/index.ts),
-  // so an HTTP call here deadlocks the startup → black screen hang.
-  // Instead we cache lazily on first tool execute, when the server is fully up.
-  let envCache: Awaited<ReturnType<typeof loadEnv>> | undefined
-  async function getEnv() {
-    if (!envCache) envCache = await loadEnv(client)
-    return envCache
-  }
-
-  // Build the description without live data; the model-specific hints are nice
-  // but not worth a deadlock. The tool still works; models/agents are resolved at
-  // execute time, which is the part that matters.
+  // Description is intentionally static. Routing policy (which model for which
+  // job) belongs in the user's own markdown, AGENTS.md, an agent's description
+  // field, or a per-repo agents file, where opencode already surfaces it to the
+  // model in context. This plugin exposes the mechanism (per-call override), the
+  // user's own docs express the intent. No duplication into every tool description.
   const baseDescription = [
     "Launch a subagent to handle a task, optionally on a model you choose.",
     "Drop-in for the built-in task tool: same subagent_type/description/prompt/task_id,",
@@ -263,10 +203,6 @@ export default ({ client }: any) => {
         },
       },
       async execute(args: any, ctx: any) {
-        // Warm the env cache on first execute (server is fully up now).
-        // Best-effort: if it fails, we just don't get the enriched hints.
-        await getEnv()
-
         // Reproduce native task's model precedence (tool/task.ts): when the caller
         // gives no explicit model, the subagent's own configured model wins, else the
         // child inherits the INVOKING assistant message's model (not the child
