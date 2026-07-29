@@ -1,10 +1,9 @@
 name: Publish
 
 # Publish is triggered ONLY by a version tag push, never by hand. That's the
-# whole point: npm and git cannot drift apart if a tag is the sole path to a
-# release. Tag vX.Y.Z, push it, this workflow verifies it matches
-# package.json's version, then publishes (skipping if that version is somehow
-# already on the registry) and mirrors it as a GitHub Release.
+# release path used by this repository. Tag vX.Y.Z, push it, this workflow
+# verifies it matches package.json's version, then publishes (skipping if that
+# version is already on the registry) and mirrors it as a GitHub Release.
 
 on:
   push:
@@ -53,7 +52,6 @@ jobs:
         run: npm publish --provenance --access public
 
       - name: Create GitHub release
-        if: steps.check.outputs.published == 'false'
-        run: gh release create "$GITHUB_REF_NAME" --generate-notes
+        run: gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --generate-notes
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

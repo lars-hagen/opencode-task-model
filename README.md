@@ -2,11 +2,11 @@
 
 An [opencode](https://opencode.ai) plugin that lets you run synchronous or background subagents on a model you choose **per call**, in the current session, without restarting opencode or hardcoding `model:` in each agent's `.md`.
 
-opencode resolves plugin tools ahead of built-ins with the same name, so the agent sees a single `task` tool: native-shaped, plus two optional args (`model`, `reasoning`). Omit them and it behaves exactly like the built-in.
+opencode resolves plugin tools ahead of built-ins with the same name, so the agent sees a single `task` tool: native-shaped, plus per-call `model` and `reasoning` controls. Use `inherit` and `default` to keep native model-selection precedence.
 
 ## Why
 
-The built-in `task` tool resolves the subagent model from the agent's frozen config (or inherits the parent model) and exposes no per-call model argument, and its `execute` is compiled into core so the arg cannot be bolted on. This plugin reimplements the spawn via the client API (`session.create` + `session.prompt`), where `model`, `agent`, and `variant` are set explicitly. With no `model` (or `inherit`), the child runs on the invoking session's model, reproducing native behavior.
+The built-in `task` tool resolves the subagent model from the agent's frozen config (or inherits the parent model) and exposes no per-call model argument, and its `execute` is compiled into core so the arg cannot be bolted on. This plugin reimplements the spawn via the client API (`session.create` + `session.prompt`), where `model`, `agent`, and `variant` are set explicitly. With `model: "inherit"`, the child uses native model precedence.
 
 ## Install
 
@@ -45,11 +45,13 @@ task(subagent_type, description, prompt, task_id, model, reasoning)
 - `subagent_type` — the subagent to run (e.g. `explore`, `general`, `review`, `design`)
 - `description` — short task description, used as the child session title
 - `prompt` — full self-contained instructions for the subagent
-- `task_id` — pass a prior task_id to resume that subagent session; empty string starts fresh
-- `model` — a raw `providerID/modelID` string straight from `opencode models` (e.g. `<provider>/<model>`). Omit it or pass `inherit` to reproduce native precedence: the subagent's own configured `model:` wins, and if it has none the child inherits the invoking session's current model. (Reasoning is not inherited via the plugin API surface; pass `reasoning` if you need a specific tier.)
-- `reasoning` — thinking effort: `default` (the model's own), or `low`/`medium`/`high` (some models also accept `xhigh`/`max`). Only affects models that support reasoning; a level the target model doesn't support is silently ignored by opencode.
+- `task_id` — pass a prior task ID created by this parent session for the same subagent; empty string starts fresh
+- `model` — a raw `providerID/modelID` string straight from `opencode models` (e.g. `<provider>/<model>`). Pass `inherit` to reproduce native precedence: the subagent's own configured `model:` wins, and if it has none the child inherits the invoking session's current model. The parent reasoning variant is inherited when the OpenCode API exposes it; pass `reasoning` for an explicit tier.
+- `reasoning` — thinking effort: `default` (the model's own), or `low`/`medium`/`high` (some models also accept `xhigh`/`max`). Only affects models that support reasoning; a level the target model doesn't support is silently ignored by opencode. Legacy plugin schemas require the `inherit`, `default`, and empty `task_id` sentinels rather than omitted arguments.
 
 It runs synchronously and returns the subagent's final text, with the child `task_id` in the result metadata for resuming.
+
+Child sessions enforce parent ownership, derived deny rules, primary-only tool restrictions, and OpenCode's configured `subagent_depth`. The public plugin API does not expose native task prompt-part resolution, so `@file` and agent references inside delegated prompts are sent as text; include the needed paths or context explicitly.
 
 ## Background tasks
 
@@ -61,11 +63,11 @@ task_bg_output(task_id)
 task_bg_list()
 ```
 
-`task_bg` returns as soon as the child session starts. The main agent can continue working while multiple children run in parallel. On completion, the plugin sends a best-effort session notification and TUI toast. `task_bg_output` returns the result without waiting; `task_bg_list` shows all tasks launched by the current session.
+`task_bg` is registered in OpenCode's `experimental.primary_tools` list and returns as soon as the child starts. OpenCode therefore disables it for all subagents instead of relying on a runtime caller check. The main agent can continue working while up to eight children run in parallel. On completion, the plugin sends a hidden synthetic session notification to the main agent and a visible TUI toast. `task_bg_output` returns the result without waiting; `task_bg_list` shows all tasks launched by the current session.
 
-Background sessions are forcibly denied `edit`, `write`, `bash`, nested `task`, and nested `task_bg`. Concurrent writes in a shared worktree cannot provide reliable conflict handling or undo boundaries. Use synchronous `task` for agents that modify files.
+Background sessions use a deny-all sandbox that permits only OpenCode's `read`, `glob`, `grep`, and `webfetch` permission names. Shell, edits, nested tasks, and tools with other permission names are blocked. OpenCode permissions are name-based: MCP resource readers map to `read`, and a custom tool that deliberately reuses an allowed built-in name cannot be distinguished by a plugin. Use trusted plugins and synchronous `task` for agents that modify files.
 
-Background state is intentionally lightweight and kept in the running plugin process. Child sessions remain in OpenCode, but `task_bg_list` state does not survive a server restart.
+Live background state is kept in the plugin process. Completed state is capped at 100 tasks per parent session and 1,000 globally, retained in memory for one hour, and each stored result is capped at 500,000 characters. `task_bg_output` and `task_bg_list` reconstruct task results from child sessions when OpenCode reloads the plugin. Active timeout and completion-notification workers do not survive a full server restart, but completed child output remains retrievable by task ID.
 
 ## Picking models
 
@@ -75,14 +77,14 @@ Routing policy stays in your own markdown. `AGENTS.md`, an agent's `description`
 
 ## Releasing
 
-Publishing to npm is tag-driven only, via `.github/workflows/publish.yml` — there's no manual `npm publish` step. To cut a release: bump `version` in `package.json`, commit it, then tag and push:
+This repository's release process is tag-driven via `.github/workflows/publish.yml`; maintainers do not run `npm publish` manually. To cut a release: bump `version` in `package.json`, commit it, then tag and push:
 
 ```sh
 git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
 
-The workflow verifies the tag matches `package.json`'s version, publishes via npm's OIDC trusted publishing (no stored token), and mirrors the tag as a GitHub Release. This keeps git and npm from drifting apart: a version can only reach the registry if it has a corresponding tag/commit in this repo.
+The workflow verifies the tag matches `package.json`'s version, publishes an unpublished version via npm's OIDC trusted publishing (no stored token), and creates the corresponding GitHub Release if it does not already exist.
 
 ## License
 
