@@ -11,19 +11,23 @@ The built-in `task` tool resolves the subagent model from the agent's frozen con
 ## Install
 
 ```sh
-opencode plugin --global opencode-task-model@latest
+VERSION="$(bun pm view opencode-task-model version)"
+opencode plugin --global "opencode-task-model@$VERSION"
 ```
 
-This installs the package and adds it to your global `opencode.json`'s `plugin` array for you. `--global` puts it in your user config so every project picks it up; drop it to install into the current project only. `@latest` tracks the newest release instead of freezing the version at install time. Or add it by hand:
+This resolves npm's current release once, installs that exact version, and adds the pinned reference to your global `opencode.json` automatically. `--global` puts it in your user config so every project picks it up; drop it to install into the current project only. Pinning avoids stale `@latest` alias or package-cache resolution.
 
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-task-model@latest"]
-}
+OpenCode installs it with Bun on startup and caches it under `~/.cache/opencode/node_modules/`. Because it overrides the built-in `task` tool, no further wiring is needed: every agent that already uses `task` picks up the `model`/`reasoning` args automatically.
+
+### Upgrade
+
+From a repository checkout, resolve the current npm version and replace the pinned global entry with:
+
+```sh
+bun run opencode:install
 ```
 
-Either way, opencode installs it with Bun on startup and caches it under `~/.cache/opencode/node_modules/`. Because it overrides the built-in `task` tool, no further wiring is needed: every agent that already uses `task` picks up the `model`/`reasoning` args automatically.
+The script runs `opencode plugin --global --force` against the exact version returned by `bun pm view`. Restart opencode afterward so the running server loads the new package.
 
 ### Local development
 
@@ -63,7 +67,7 @@ task_bg_output(task_id)
 task_bg_list()
 ```
 
-`task_bg` is registered in OpenCode's `experimental.primary_tools` list and returns as soon as the child starts. OpenCode therefore disables it for all subagents instead of relying on a runtime caller check. The main agent can continue working while up to eight children run in parallel. On completion, the plugin sends a hidden synthetic session notification to the main agent and a visible TUI toast. `task_bg_output` returns the result without waiting; `task_bg_list` shows all tasks launched by the current session.
+`task_bg` is registered in OpenCode's `experimental.primary_tools` list and returns as soon as the child starts. OpenCode therefore disables it for all subagents instead of relying on a runtime caller check. The main agent can continue working while up to eight children run in parallel. On completion, the plugin shows a visible TUI toast and stores a hidden synthetic notification for the main agent's next normal turn. It does not start a second assistant turn automatically, avoiding a transient duplicate model footer while the user is typing. `task_bg_output` returns the result without waiting; `task_bg_list` shows all tasks launched by the current session.
 
 Background sessions use a deny-all sandbox that permits only OpenCode's `read`, `glob`, `grep`, and `webfetch` permission names. Shell, edits, nested tasks, and tools with other permission names are blocked. OpenCode permissions are name-based: MCP resource readers map to `read`, and a custom tool that deliberately reuses an allowed built-in name cannot be distinguished by a plugin. Use trusted plugins and synchronous `task` for agents that modify files.
 

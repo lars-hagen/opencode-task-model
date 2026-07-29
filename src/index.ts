@@ -428,22 +428,17 @@ async function notifyBackgroundComplete(client: any, task: BackgroundTask) {
       // Fall back to the invoking agent captured at launch.
     }
     const body = {
-      noReply: false,
+      // Persist hidden context for the parent's next normal turn without spawning
+      // an empty assistant turn, which briefly renders a duplicate model footer.
+      noReply: true,
       ...(parentAgent ? { agent: parentAgent } : {}),
       ...(task.variant ? { variant: task.variant } : {}),
       parts: [{ type: "text", synthetic: true, text: notification }],
     }
-    if (typeof client.session?.promptAsync === "function") {
-      await client.session.promptAsync({
-        path: { id: task.parentSessionID },
-        body,
-      })
-    } else if (typeof client?._client?.post === "function") {
-      await client._client.post({
-        url: `/session/${task.parentSessionID}/prompt_async`,
-        body,
-      })
-    }
+    await client.session.prompt({
+      path: { id: task.parentSessionID },
+      body,
+    })
   } catch {
     // Best-effort. The task remains discoverable through task_bg_list.
   }

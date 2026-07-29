@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
   "name": "opencode-task-model",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "type": "module",
   "description": "OpenCode plugin for synchronous and background subagents with per-call model and reasoning selection",
   "keywords": [
@@ -30,6 +30,9 @@
     "LICENSE"
   ],
   "sideEffects": false,
+  "scripts": {
+    "opencode:install": "opencode plugin --global --force opencode-task-model@$(bun pm view opencode-task-model version)"
+  },
   "exports": {
     ".": "./src/index.ts",
     "./server": "./src/index.ts"
