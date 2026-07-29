@@ -2,7 +2,7 @@
 //
 // Overrides the built-in `task` tool. opencode resolves plugin tools ahead of
 // built-ins of the same name, so the agent sees ONE task tool: native-shaped,
-// plus an optional per-call `model` (and `reasoning`) so you can run a subagent
+// plus per-call `model`, `reasoning`, and native-shaped background controls so you can run a subagent
 // on a specific model in the current session without restarting or hardcoding
 // `model:` in the agent .md. Loaded via the `plugin` array in opencode.json.
 //
@@ -16,7 +16,8 @@
 // Intentionally dependency-free (no imports, `any` types): keeps the plugin
 // trivial to load and resolve regardless of where node_modules lives. The
 // legacy arg-schema path marks every arg required, so the "optional" args use
-// sentinels: model 'inherit', reasoning 'default', task_id '' (empty = fresh).
+// sentinels: model 'inherit', reasoning 'default', task_id '' (empty = fresh),
+// and background false (foreground).
 
 // Reasoning effort, passed to the subagent as the prompt `variant`. low/medium/high
 // (and xhigh/max where a model supports them) map to the variant; a level the target
@@ -69,7 +70,6 @@ const BACKGROUND_SANDBOX_RULES = [
   { permission: "write", pattern: "*", action: "deny" },
   { permission: "bash", pattern: "*", action: "deny" },
   { permission: "task", pattern: "*", action: "deny" },
-  { permission: "task_bg", pattern: "*", action: "deny" },
   { permission: "todowrite", pattern: "*", action: "deny" },
 ]
 
@@ -105,7 +105,6 @@ function childPermissions(parent: any, background: boolean, agent?: any, primary
   if (background) return [...BACKGROUND_SANDBOX_RULES, ...rules]
   const denied = [
     ...(!declares("task") ? ["task"] : []),
-    "task_bg",
     ...(!declares("todowrite") ? ["todowrite"] : []),
     ...primaryTools,
   ]
@@ -409,15 +408,19 @@ function lastText(res: any) {
 }
 
 async function notifyBackgroundComplete(client: any, task: BackgroundTask) {
+  const state = task.status === "completed" ? "completed" : "error"
+  const detail = task.status === "completed"
+    ? task.result || "(subagent returned no text)"
+    : task.error || `Background task ${task.status}.`
+  const tag = state === "completed" ? "task_result" : "task_error"
   const notification = [
-    "<task-notification>",
-    `<task-id>${xmlEscape(task.id)}</task-id>`,
-    `<status>${task.status}</status>`,
+    `<task id="${xmlEscape(task.id)}" state="${state}">`,
     `<summary>Background task ${task.status}: ${xmlEscape(task.description)}</summary>`,
-    task.error ? `<error>${xmlEscape(task.error)}</error>` : "",
-    `<retrieval>Call task_bg_output with task_id "${xmlEscape(task.id)}" to retrieve the result.</retrieval>`,
-    "</task-notification>",
-  ].filter(Boolean).join("\n")
+    `<${tag}>`,
+    xmlEscape(detail),
+    `</${tag}>`,
+    "</task>",
+  ].join("\n")
 
   try {
     let parentAgent = task.parentAgent
@@ -433,6 +436,7 @@ async function notifyBackgroundComplete(client: any, task: BackgroundTask) {
       noReply: true,
       ...(parentAgent ? { agent: parentAgent } : {}),
       ...(task.variant ? { variant: task.variant } : {}),
+      // Keep the actionable task ID hidden in the TUI but available to the model.
       parts: [{ type: "text", synthetic: true, text: notification }],
     }
     await client.session.prompt({
@@ -440,7 +444,7 @@ async function notifyBackgroundComplete(client: any, task: BackgroundTask) {
       body,
     })
   } catch {
-    // Best-effort. The task remains discoverable through task_bg_list.
+    // Best-effort. The child session remains available through normal session history.
   }
 
   try {
@@ -496,6 +500,142 @@ async function setRunningMetadata(client: any, ctx: any, metadata: Record<string
   }
 }
 
+async function startBackgroundTask(
+  client: any,
+  args: any,
+  ctx: any,
+  permissions: any[],
+  model: { providerID: string; modelID: string } | undefined,
+  variant: string | undefined,
+  parentVariant: string | undefined,
+) {
+  await recoverBackgroundChildren(client, ctx.sessionID)
+  pruneBackgroundTasks()
+  if (!reserveBackgroundLaunch(ctx.sessionID)) {
+    return `task: maximum of ${BACKGROUND_MAX_ACTIVE_PER_PARENT} active background tasks reached for this session`
+  }
+
+  let sessionID: string
+  let task: BackgroundTask
+  try {
+    const candidate = typeof args.task_id === "string" && args.task_id.trim() ? args.task_id.trim() : undefined
+    let existing: any
+    if (candidate) {
+      try {
+        existing = await client.session.get({ path: { id: candidate } })
+      } catch {
+        // Match native task behavior: a deleted ID starts a fresh child.
+      }
+    }
+
+    if (candidate && !existing?.error && existing?.data?.id) {
+      await verifyChildSession(client, candidate, ctx.sessionID, args.subagent_type, permissions)
+      const recovered = await recoverBackgroundTask(client, candidate, ctx.sessionID)
+      if (recovered?.status === "running") return `task: background task_id "${candidate}" is already running`
+      sessionID = candidate
+    } else {
+      const created = await client.session.create({
+        body: {
+          parentID: ctx.sessionID,
+          agent: args.subagent_type,
+          title: `${args.description} (@${args.subagent_type}, background)`,
+          permission: permissions,
+        },
+      })
+      if (created.error || !created.data?.id) {
+        return `task: failed to create background session: ${JSON.stringify(created.error ?? "unknown")}`
+      }
+      sessionID = created.data.id
+      await verifyChildSession(client, sessionID, ctx.sessionID, args.subagent_type, permissions)
+    }
+
+    task = {
+      id: sessionID,
+      parentSessionID: ctx.sessionID,
+      agent: args.subagent_type,
+      description: args.description,
+      status: "running",
+      createdAt: Date.now(),
+      ...(model ? { model } : {}),
+      ...(parentVariant ? { variant: parentVariant } : {}),
+      ...(ctx.agent ? { parentAgent: ctx.agent } : {}),
+    }
+    backgroundTasks.set(sessionID, task)
+  } catch (e) {
+    return `task: failed to start background session: ${errMsg(e)}`
+  } finally {
+    releaseBackgroundLaunch(ctx.sessionID)
+  }
+
+  const metadata = {
+    sessionId: sessionID,
+    parentSessionId: ctx.sessionID,
+    background: true,
+    jobId: sessionID,
+    ...(model ? { model } : {}),
+  }
+  await setRunningMetadata(client, ctx, metadata, args.description)
+
+  const timer = setTimeout(() => {
+    if (task.status !== "running") return
+    task.status = "timeout"
+    task.completedAt = Date.now()
+    task.error = "Background task timed out after 15 minutes"
+    try {
+      void Promise.resolve(client.session.abort({ path: { id: sessionID } })).catch(() => {})
+    } catch {
+      // Best-effort timeout cancellation.
+    }
+    pruneBackgroundTasks()
+    void notifyBackgroundComplete(client, task)
+  }, BACKGROUND_TIMEOUT_MS)
+
+  void Promise.resolve().then(() => client.session.prompt({
+    path: { id: sessionID },
+    body: {
+      agent: args.subagent_type,
+      ...(model ? { model } : {}),
+      ...(variant ? { variant } : {}),
+      parts: [{ type: "text", text: args.prompt }],
+    },
+  })).then((res: any) => {
+    if (task.status !== "running") return
+    clearTimeout(timer)
+    task.completedAt = Date.now()
+    if (res?.error) {
+      task.status = "error"
+      task.error = capResult(`Subagent error: ${JSON.stringify(res.error)}`)
+    } else {
+      task.status = "completed"
+      task.result = capResult(lastText(res) || "(subagent returned no text)")
+    }
+    pruneBackgroundTasks()
+    void notifyBackgroundComplete(client, task)
+  }).catch((e: unknown) => {
+    if (task.status !== "running") return
+    clearTimeout(timer)
+    task.status = "error"
+    task.completedAt = Date.now()
+    task.error = capResult(`Subagent threw: ${errMsg(e)}`)
+    pruneBackgroundTasks()
+    void notifyBackgroundComplete(client, task)
+  })
+
+  return {
+    title: args.description,
+    output: [
+      `<task id="${xmlEscape(sessionID)}" state="running">`,
+      "<summary>Background task started</summary>",
+      "<task_result>",
+      "The task is working in the background. You will be notified automatically when it finishes.",
+      "Continue with non-overlapping work; do not poll immediately.",
+      "</task_result>",
+      "</task>",
+    ].join("\n"),
+    metadata,
+  }
+}
+
 export default ({ client }: any) => {
   // Description is intentionally static. Routing policy (which model for which
   // job) belongs in the user's own markdown, AGENTS.md, an agent's description
@@ -519,20 +659,13 @@ export default ({ client }: any) => {
     "Reach for an explicit model only when the job needs more capability, or a cheaper",
     "pass, than the subagent's default. If the user names a model or thinking level in",
     "plain language (e.g. 'use the big model'), honor it.",
-    "Pass a prior task_id to resume that subagent session instead of starting fresh.",
-    "Returns the subagent's final text. Runs synchronously.",
+    "Pass a prior task_id to resume that subagent session in the same foreground or background mode.",
+    "A running background task cannot be extended; wait for it to finish before reusing its task_id.",
+    "Set background=true to return immediately and run independent work asynchronously.",
+    "Foreground is the default and returns the subagent's final text.",
   ].join(" ")
 
   return {
-    config: async (config: any) => {
-      const primaryTools = config.experimental?.primary_tools ?? []
-      if (!primaryTools.includes("task_bg")) {
-        config.experimental = {
-          ...config.experimental,
-          primary_tools: [...primaryTools, "task_bg"],
-        }
-      }
-    },
     tool: {
     task: {
       description: baseDescription,
@@ -552,7 +685,7 @@ export default ({ client }: any) => {
         task_id: {
           type: "string",
           description:
-            "Resume: pass a task_id from a prior task result to continue that subagent session. Empty string starts a fresh task.",
+            "Resume a completed task in the same foreground or background mode. A running background task cannot be extended. Empty string starts fresh.",
         },
         model: {
           type: "string",
@@ -567,12 +700,18 @@ export default ({ client }: any) => {
             "Reasoning effort passed to the subagent as the prompt variant. 'default' leaves it to the model. " +
             "Only affects models that support reasoning; unsupported values are ignored by opencode.",
         },
+        background: {
+          type: "boolean",
+          description:
+            "Run the agent in the background and return immediately. Use false for normal foreground execution.",
+        },
       },
       async execute(args: any, ctx: any) {
         await enforceSubagentDepth(client, ctx)
         await authorizeTask(ctx, args)
         const agent = await resolveAgent(client, args.subagent_type)
-        const { permissions } = await parentAndPermissions(client, ctx, false, agent)
+        const runInBackground = args.background === true
+        const { permissions } = await parentAndPermissions(client, ctx, runInBackground, agent)
         // Reproduce native task's model precedence (tool/task.ts): when the caller
         // gives no explicit model, the subagent's own configured model wins, else the
         // child inherits the INVOKING assistant message's model (not the child
@@ -582,6 +721,10 @@ export default ({ client }: any) => {
         // arg overrides both. All lookups are best-effort: on failure we leave model
         // undefined and let the server resolve it, the pre-fix fallback.
         const { model, variant } = await resolveModelVariant(client, args, ctx)
+        if (runInBackground) {
+          const parentVariant = (await parentModelVariant(client, ctx))?.variant
+          return startBackgroundTask(client, args, ctx, permissions, model, variant, parentVariant)
+        }
 
         // Resolve the child session: resume a VALID prior task_id, else create fresh.
         // Matches native behavior (tool/task.ts): an unknown/stale/deleted task_id
@@ -710,189 +853,6 @@ export default ({ client }: any) => {
           output: renderOutput(sessionID!, "completed", text || "(subagent returned no text)"),
           metadata: liveMeta,
         }
-      },
-    },
-    task_bg: {
-      description: [
-        "Launch a read-only subagent in the background and return immediately.",
-        "This plugin registers task_bg as a primary-only tool, so subagents cannot invoke it.",
-        "The child permission sandbox allows only read, glob, grep, and webfetch permission names.",
-        "Use this for independent research, exploration, and review while you continue working.",
-        "The child is forcibly denied edit, write, bash, and nested task tools to prevent concurrent workspace mutations.",
-        "Supports the same dynamic model and reasoning overrides as task.",
-        "A completion notification is sent when possible; use task_bg_output or task_bg_list to inspect it.",
-      ].join(" "),
-      args: {
-        subagent_type: {
-          type: "string",
-          description: "Subagent to run: explore, general, review, or design.",
-        },
-        description: {
-          type: "string",
-          description: "Short 3-5 word task description.",
-        },
-        prompt: {
-          type: "string",
-          description: "Full self-contained instructions for the subagent.",
-        },
-        model: {
-          type: "string",
-          description: "Raw provider/model ref, or 'inherit' for native model resolution.",
-        },
-        reasoning: {
-          type: "string",
-          enum: REASONING,
-          description: "Reasoning effort. Use 'default' to keep the model or agent default.",
-        },
-      },
-      async execute(args: any, ctx: any) {
-        await enforceSubagentDepth(client, ctx)
-        await authorizeTask(ctx, args)
-        const agent = await resolveAgent(client, args.subagent_type)
-        const { permissions } = await parentAndPermissions(client, ctx, true, agent)
-        const { model, variant } = await resolveModelVariant(client, args, ctx)
-        const parentVariant = (await parentModelVariant(client, ctx))?.variant
-        await recoverBackgroundChildren(client, ctx.sessionID)
-        pruneBackgroundTasks()
-        if (!reserveBackgroundLaunch(ctx.sessionID)) {
-          return `task_bg: maximum of ${BACKGROUND_MAX_ACTIVE_PER_PARENT} active background tasks reached for this session`
-        }
-        let sessionID: string
-        try {
-          const created = await client.session.create({
-            body: {
-              parentID: ctx.sessionID,
-              agent: args.subagent_type,
-              title: `${args.description} (@${args.subagent_type}, background)`,
-              permission: permissions,
-            },
-          })
-          if (created.error || !created.data?.id) {
-            releaseBackgroundLaunch(ctx.sessionID)
-            return `task_bg: failed to create session: ${JSON.stringify(created.error ?? "unknown")}`
-          }
-          sessionID = created.data.id
-          await verifyChildSession(client, sessionID, ctx.sessionID, args.subagent_type, permissions)
-        } catch (e) {
-          releaseBackgroundLaunch(ctx.sessionID)
-          return `task_bg: failed to create session: ${errMsg(e)}`
-        }
-
-        const task: BackgroundTask = {
-          id: sessionID,
-          parentSessionID: ctx.sessionID,
-          agent: args.subagent_type,
-          description: args.description,
-          status: "running",
-          createdAt: Date.now(),
-          ...(model ? { model } : {}),
-          ...(parentVariant ? { variant: parentVariant } : {}),
-          ...(ctx.agent ? { parentAgent: ctx.agent } : {}),
-        }
-        backgroundTasks.set(sessionID, task)
-        releaseBackgroundLaunch(ctx.sessionID)
-
-        const timer = setTimeout(() => {
-          if (task.status !== "running") return
-          task.status = "timeout"
-          task.completedAt = Date.now()
-          task.error = "Background task timed out after 15 minutes"
-          try {
-            void Promise.resolve(client.session.abort({ path: { id: sessionID } })).catch(() => {})
-          } catch {
-            // Best-effort timeout cancellation.
-          }
-          pruneBackgroundTasks()
-          void notifyBackgroundComplete(client, task)
-        }, BACKGROUND_TIMEOUT_MS)
-
-        void Promise.resolve().then(() => client.session.prompt({
-          path: { id: sessionID },
-          body: {
-            agent: args.subagent_type,
-            ...(model ? { model } : {}),
-            ...(variant ? { variant } : {}),
-            parts: [{ type: "text", text: args.prompt }],
-          },
-        })).then((res: any) => {
-          if (task.status !== "running") return
-          clearTimeout(timer)
-          task.completedAt = Date.now()
-          if (res?.error) {
-            task.status = "error"
-            task.error = capResult(`Subagent error: ${JSON.stringify(res.error)}`)
-          } else {
-            task.status = "completed"
-            task.result = capResult(lastText(res) || "(subagent returned no text)")
-          }
-          pruneBackgroundTasks()
-          void notifyBackgroundComplete(client, task)
-        }).catch((e: unknown) => {
-          if (task.status !== "running") return
-          clearTimeout(timer)
-          task.status = "error"
-          task.completedAt = Date.now()
-          task.error = capResult(`Subagent threw: ${errMsg(e)}`)
-          pruneBackgroundTasks()
-          void notifyBackgroundComplete(client, task)
-        })
-
-        return {
-          title: args.description,
-          output: [
-            `<task id="${xmlEscape(sessionID)}" state="running">`,
-            "Background task started. Continue working; do not wait or poll immediately.",
-            `Use task_bg_output(task_id="${sessionID}") when notified, or task_bg_list() to inspect active tasks.`,
-            "</task>",
-          ].join("\n"),
-          metadata: { sessionId: sessionID, parentSessionId: ctx.sessionID, ...(model ? { model } : {}) },
-        }
-      },
-    },
-    task_bg_output: {
-      description: "Return the current status and result of a background task without waiting for it.",
-      args: {
-        task_id: {
-          type: "string",
-          description: "Background task ID returned by task_bg.",
-        },
-      },
-      async execute(args: any, ctx: any) {
-        pruneBackgroundTasks()
-        const id = typeof args.task_id === "string" ? args.task_id.trim() : ""
-        const cached = backgroundTasks.get(id)
-        const task = !cached || cached.status === "running"
-          ? await recoverBackgroundTask(client, id, ctx.sessionID)
-          : cached
-        if (!task || task.parentSessionID !== ctx.sessionID) {
-          return `task_bg_output: unknown task_id "${id}" in this session`
-        }
-        const detail = task.status === "completed" ? task.result : task.error
-        const output = task.status === "running"
-          ? [`<task id="${xmlEscape(task.id)}" state="running">`, "Background task is still running.", "</task>"].join("\n")
-          : renderOutput(task.id, task.status === "completed" ? "completed" : "error",
-              detail || `Background task ${task.status}.`)
-        return {
-          title: task.description,
-          output,
-          metadata: { sessionId: task.id, parentSessionId: task.parentSessionID, ...(task.model ? { model: task.model } : {}) },
-        }
-      },
-    },
-    task_bg_list: {
-      description: "List background tasks launched by the current session and their statuses.",
-      args: {},
-      async execute(_args: any, ctx: any) {
-        pruneBackgroundTasks()
-        await recoverBackgroundChildren(client, ctx.sessionID)
-        pruneBackgroundTasks()
-        const tasks = [...backgroundTasks.values()]
-          .filter((task) => task.parentSessionID === ctx.sessionID)
-          .sort((a, b) => b.createdAt - a.createdAt)
-        if (!tasks.length) return "No background tasks in this session."
-        return tasks.map((task) =>
-          `${task.id}  ${task.status.padEnd(9)}  @${task.agent}  ${task.description}`
-        ).join("\n")
       },
     },
   },
