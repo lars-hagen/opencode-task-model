@@ -1,6 +1,6 @@
 # opencode-task-model
 
-An [opencode](https://opencode.ai) plugin that **overrides the built-in `task` tool** so you can run a subagent on a model you choose **per call**, in the current session, without restarting opencode or hardcoding `model:` in each agent's `.md`.
+An [opencode](https://opencode.ai) plugin that lets you run synchronous or background subagents on a model you choose **per call**, in the current session, without restarting opencode or hardcoding `model:` in each agent's `.md`.
 
 opencode resolves plugin tools ahead of built-ins with the same name, so the agent sees a single `task` tool: native-shaped, plus two optional args (`model`, `reasoning`). Omit them and it behaves exactly like the built-in.
 
@@ -51,9 +51,25 @@ task(subagent_type, description, prompt, task_id, model, reasoning)
 
 It runs synchronously and returns the subagent's final text, with the child `task_id` in the result metadata for resuming.
 
+## Background tasks
+
+Use `task_bg` for independent read-only work that should not block the calling agent:
+
+```
+task_bg(subagent_type, description, prompt, model, reasoning)
+task_bg_output(task_id)
+task_bg_list()
+```
+
+`task_bg` returns as soon as the child session starts. The main agent can continue working while multiple children run in parallel. On completion, the plugin sends a best-effort session notification and TUI toast. `task_bg_output` returns the result without waiting; `task_bg_list` shows all tasks launched by the current session.
+
+Background sessions are forcibly denied `edit`, `write`, `bash`, nested `task`, and nested `task_bg`. Concurrent writes in a shared worktree cannot provide reliable conflict handling or undo boundaries. Use synchronous `task` for agents that modify files.
+
+Background state is intentionally lightweight and kept in the running plugin process. Child sessions remain in OpenCode, but `task_bg_list` state does not survive a server restart.
+
 ## Picking models
 
-There's no alias table — `model` takes a raw `providerID/modelID` string, so anything `opencode models` lists works without touching the plugin. Reasoning is passed through as the prompt `variant`, so any effort tier the target model exposes works without further config.
+There's no alias table — `model` takes a raw `providerID/modelID` string, so anything `opencode models` lists works without touching the plugin. This applies equally to `task` and `task_bg`. Reasoning is passed through as the prompt `variant`, so any effort tier the target model exposes works without further config.
 
 Routing policy stays in your own markdown. `AGENTS.md`, an agent's `description` field, or a per-repo agents file, opencode already surfaces those to the model in context. Put "prefer `openai/gpt-5.6-terra` for reviews" wherever it belongs for you; the plugin just carries out the per-call override. No duplicated model registry baked into the tool description, no config schema to keep in sync.
 

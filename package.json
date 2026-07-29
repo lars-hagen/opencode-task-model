@@ -1,16 +1,18 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
   "name": "opencode-task-model",
-  "version": "1.1.5",
+  "version": "1.2.0",
   "type": "module",
-  "description": "OpenCode plugin: overrides the built-in `task` tool to run a subagent on a different model or reasoning effort per call",
+  "description": "OpenCode plugin for synchronous and background subagents with per-call model and reasoning selection",
   "keywords": [
     "opencode",
     "opencode-plugin",
     "plugin",
     "subagent",
     "task",
-    "model-selection"
+    "model-selection",
+    "background-agents",
+    "parallel-agents"
   ],
   "license": "MIT",
   "author": "Lars Hagen <larsh2690@hotmail.com>",

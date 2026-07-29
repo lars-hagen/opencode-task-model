@@ -99,6 +99,88 @@ function renderOutput(sessionID: string, state: "completed" | "error", text: str
   return [`<task id="${sessionID}" state="${state}">`, `<${tag}>`, text, `</${tag}>`, "</task>"].join("\n")
 }
 
+type BackgroundStatus = "running" | "completed" | "error" | "timeout"
+
+type BackgroundTask = {
+  id: string
+  parentSessionID: string
+  agent: string
+  description: string
+  status: BackgroundStatus
+  createdAt: number
+  completedAt?: number
+  result?: string
+  error?: string
+  model?: { providerID: string; modelID: string }
+}
+
+const backgroundTasks = new Map<string, BackgroundTask>()
+const BACKGROUND_TIMEOUT_MS = 15 * 60 * 1000
+
+async function resolveModelVariant(client: any, args: any, ctx: any) {
+  let model = modelRef(args.model)
+  let variant = args.reasoning && args.reasoning !== "default" ? args.reasoning : undefined
+  if (!model) {
+    const configured = await agentModel(client, args.subagent_type)
+    if (configured) {
+      model = configured
+    } else {
+      const parent = await parentModelVariant(client, ctx)
+      if (parent) {
+        model = parent.model
+        if (!variant) variant = parent.variant
+      }
+    }
+  }
+  return { model, variant }
+}
+
+function lastText(res: any) {
+  const parts = res?.data?.parts ?? []
+  const last = parts.filter((p: any) => p.type === "text" && typeof p.text === "string").pop()
+  return (last?.text ?? "").trim()
+}
+
+async function notifyBackgroundComplete(client: any, task: BackgroundTask, parentAgent?: string) {
+  const notification = [
+    "<task-notification>",
+    `<task-id>${task.id}</task-id>`,
+    `<status>${task.status}</status>`,
+    `<summary>Background task ${task.status}: ${task.description}</summary>`,
+    task.error ? `<error>${task.error}</error>` : "",
+    `<retrieval>Call task_bg_output with task_id "${task.id}" to retrieve the result.</retrieval>`,
+    "</task-notification>",
+  ].filter(Boolean).join("\n")
+
+  try {
+    if (typeof client.session?.promptAsync === "function") {
+      await client.session.promptAsync({
+        path: { id: task.parentSessionID },
+        body: { noReply: true, ...(parentAgent ? { agent: parentAgent } : {}), parts: [{ type: "text", text: notification }] },
+      })
+    } else if (typeof client?._client?.post === "function") {
+      await client._client.post({
+        url: `/session/${task.parentSessionID}/prompt_async`,
+        body: { noReply: true, ...(parentAgent ? { agent: parentAgent } : {}), parts: [{ type: "text", text: notification }] },
+      })
+    }
+  } catch {
+    // Best-effort. The task remains discoverable through task_bg_list.
+  }
+
+  try {
+    await client.tui?.showToast({
+      body: {
+        title: "Background task finished",
+        message: `${task.description}: ${task.status}`,
+        variant: task.status === "completed" ? "success" : "error",
+      },
+    })
+  } catch {
+    // TUI may not be attached (server/headless use).
+  }
+}
+
 // Set this tool part's metadata.sessionId WHILE the subagent runs, so the TUI Task
 // renderer (routes/session/index.tsx) lights up its live "running" branch: child
 // sync, clickable nav, and the streaming current-tool line. The built-in task tool
@@ -211,20 +293,7 @@ export default ({ client }: any) => {
         // `variant: next.model ? undefined : parentVariant`. An explicit model/reasoning
         // arg overrides both. All lookups are best-effort: on failure we leave model
         // undefined and let the server resolve it, the pre-fix fallback.
-        let model = modelRef(args.model)
-        let variant = args.reasoning && args.reasoning !== "default" ? args.reasoning : undefined
-        if (!model) {
-          const configured = await agentModel(client, args.subagent_type)
-          if (configured) {
-            model = configured
-          } else {
-            const parent = await parentModelVariant(client, ctx)
-            if (parent) {
-              model = parent.model
-              if (!variant) variant = parent.variant
-            }
-          }
-        }
+        const { model, variant } = await resolveModelVariant(client, args, ctx)
 
         // Resolve the child session: resume a VALID prior task_id, else create fresh.
         // Matches native behavior (tool/task.ts): an unknown/stale/deleted task_id
@@ -302,7 +371,7 @@ export default ({ client }: any) => {
           abortChild()
           return {
             title: args.description,
-            output: renderOutput(sessionID, "error", "task: aborted before the subagent started"),
+            output: renderOutput(sessionID!, "error", "task: aborted before the subagent started"),
             metadata: liveMeta,
           }
         }
@@ -325,7 +394,7 @@ export default ({ client }: any) => {
         } catch (e) {
           return {
             title: args.description,
-            output: renderOutput(sessionID, "error", `task: subagent threw: ${errMsg(e)}`),
+            output: renderOutput(sessionID!, "error", `task: subagent threw: ${errMsg(e)}`),
             metadata: liveMeta,
           }
         } finally {
@@ -336,16 +405,14 @@ export default ({ client }: any) => {
         if (res.error) {
           return {
             title: args.description,
-            output: renderOutput(sessionID, "error", `task: subagent error: ${JSON.stringify(res.error)}`),
+            output: renderOutput(sessionID!, "error", `task: subagent error: ${JSON.stringify(res.error)}`),
             metadata: liveMeta,
           }
         }
         // Native returns only the LAST text part of the child result (tool/task.ts:
         // result.parts.findLast(text)), not every text part joined; joining can
         // duplicate or interleave intermediate assistant text.
-        const parts = res.data?.parts ?? []
-        const last = parts.filter((p: any) => p.type === "text" && typeof p.text === "string").pop()
-        const text = (last?.text ?? "").trim()
+        const text = lastText(res)
 
         // Metadata keys MUST be camelCase sessionId/parentSessionId: the TUI Task
         // renderer keys its child-session sync, clickable navigation, toolcall count
@@ -353,9 +420,182 @@ export default ({ client }: any) => {
         // model mirrors the built-in's { providerID, modelID } shape when known.
         return {
           title: args.description,
-          output: renderOutput(sessionID, "completed", text || "(subagent returned no text)"),
+          output: renderOutput(sessionID!, "completed", text || "(subagent returned no text)"),
           metadata: liveMeta,
         }
+      },
+    },
+    task_bg: {
+      description: [
+        "Launch a read-only subagent in the background and return immediately.",
+        "Use this for independent research, exploration, and review while you continue working.",
+        "The child is forcibly denied edit, write, bash, and nested task tools to prevent concurrent workspace mutations.",
+        "Supports the same dynamic model and reasoning overrides as task.",
+        "A completion notification is sent when possible; use task_bg_output or task_bg_list to inspect it.",
+      ].join(" "),
+      args: {
+        subagent_type: {
+          type: "string",
+          description: "Subagent to run: explore, general, review, or design.",
+        },
+        description: {
+          type: "string",
+          description: "Short 3-5 word task description.",
+        },
+        prompt: {
+          type: "string",
+          description: "Full self-contained instructions for the subagent.",
+        },
+        model: {
+          type: "string",
+          description: "Raw provider/model ref, or 'inherit' for native model resolution.",
+        },
+        reasoning: {
+          type: "string",
+          enum: REASONING,
+          description: "Reasoning effort. Use 'default' to keep the model or agent default.",
+        },
+      },
+      async execute(args: any, ctx: any) {
+        const { model, variant } = await resolveModelVariant(client, args, ctx)
+        let inheritedPermissions: any[] = []
+        try {
+          const parent = await client.session.get({ path: { id: ctx.sessionID } })
+          const rules = Array.isArray(parent.data?.permission) ? parent.data.permission : []
+          inheritedPermissions = rules.filter((rule: any) =>
+            rule?.action === "deny" || rule?.permission === "external_directory"
+          )
+        } catch {
+          // Older servers may not expose session permissions. Fixed write denies below still apply.
+        }
+        let sessionID: string
+        try {
+          const created = await client.session.create({
+            body: {
+              parentID: ctx.sessionID,
+              agent: args.subagent_type,
+              title: `${args.description} (@${args.subagent_type}, background)`,
+              permission: [
+                ...inheritedPermissions,
+                { permission: "edit", pattern: "*", action: "deny" },
+                { permission: "write", pattern: "*", action: "deny" },
+                { permission: "bash", pattern: "*", action: "deny" },
+                { permission: "task", pattern: "*", action: "deny" },
+                { permission: "task_bg", pattern: "*", action: "deny" },
+                { permission: "todowrite", pattern: "*", action: "deny" },
+              ],
+            },
+          })
+          if (created.error || !created.data?.id) {
+            return `task_bg: failed to create session: ${JSON.stringify(created.error ?? "unknown")}`
+          }
+          sessionID = created.data.id
+        } catch (e) {
+          return `task_bg: failed to create session: ${errMsg(e)}`
+        }
+
+        const task: BackgroundTask = {
+          id: sessionID,
+          parentSessionID: ctx.sessionID,
+          agent: args.subagent_type,
+          description: args.description,
+          status: "running",
+          createdAt: Date.now(),
+          ...(model ? { model } : {}),
+        }
+        backgroundTasks.set(sessionID, task)
+
+        const timer = setTimeout(() => {
+          if (task.status !== "running") return
+          task.status = "timeout"
+          task.completedAt = Date.now()
+          task.error = "Background task timed out after 15 minutes"
+          try {
+            void Promise.resolve(client.session.abort({ path: { id: sessionID } })).catch(() => {})
+          } catch {
+            // Best-effort timeout cancellation.
+          }
+          void notifyBackgroundComplete(client, task, ctx.agent)
+        }, BACKGROUND_TIMEOUT_MS)
+
+        void Promise.resolve(client.session.prompt({
+          path: { id: sessionID },
+          body: {
+            agent: args.subagent_type,
+            ...(model ? { model } : {}),
+            ...(variant ? { variant } : {}),
+            parts: [{ type: "text", text: args.prompt }],
+          },
+        })).then((res: any) => {
+          if (task.status !== "running") return
+          clearTimeout(timer)
+          task.completedAt = Date.now()
+          if (res?.error) {
+            task.status = "error"
+            task.error = `Subagent error: ${JSON.stringify(res.error)}`
+          } else {
+            task.status = "completed"
+            task.result = lastText(res) || "(subagent returned no text)"
+          }
+          void notifyBackgroundComplete(client, task, ctx.agent)
+        }).catch((e: unknown) => {
+          if (task.status !== "running") return
+          clearTimeout(timer)
+          task.status = "error"
+          task.completedAt = Date.now()
+          task.error = `Subagent threw: ${errMsg(e)}`
+          void notifyBackgroundComplete(client, task, ctx.agent)
+        })
+
+        return {
+          title: args.description,
+          output: [
+            `<task id="${sessionID}" state="running">`,
+            "Background task started. Continue working; do not wait or poll immediately.",
+            `Use task_bg_output(task_id="${sessionID}") when notified, or task_bg_list() to inspect active tasks.`,
+            "</task>",
+          ].join("\n"),
+          metadata: { sessionId: sessionID, parentSessionId: ctx.sessionID, ...(model ? { model } : {}) },
+        }
+      },
+    },
+    task_bg_output: {
+      description: "Return the current status and result of a background task without waiting for it.",
+      args: {
+        task_id: {
+          type: "string",
+          description: "Background task ID returned by task_bg.",
+        },
+      },
+      async execute(args: any, ctx: any) {
+        const id = typeof args.task_id === "string" ? args.task_id.trim() : ""
+        const task = backgroundTasks.get(id)
+        if (!task || task.parentSessionID !== ctx.sessionID) {
+          return `task_bg_output: unknown task_id "${id}" in this session`
+        }
+        const detail = task.status === "completed" ? task.result : task.error
+        const output = task.status === "running"
+          ? [`<task id="${task.id}" state="running">`, "Background task is still running.", "</task>"].join("\n")
+          : renderOutput(task.id, task.status === "completed" ? "completed" : "error",
+              detail || `Background task ${task.status}.`)
+        return {
+          title: task.description,
+          output,
+          metadata: { sessionId: task.id, parentSessionId: task.parentSessionID, ...(task.model ? { model: task.model } : {}) },
+        }
+      },
+    },
+    task_bg_list: {
+      description: "List background tasks launched by the current session and their statuses.",
+      args: {},
+      async execute(_args: any, ctx: any) {
+        const tasks = [...backgroundTasks.values()]
+          .filter((task) => task.parentSessionID === ctx.sessionID)
+          .sort((a, b) => b.createdAt - a.createdAt)
+        if (!tasks.length) return "No background tasks in this session."
+        return tasks.map((task) =>
+          `${task.id}  ${task.status.padEnd(9)}  @${task.agent}  ${task.description}`
+        ).join("\n")
       },
     },
   },
