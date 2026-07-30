@@ -421,6 +421,12 @@ async function notifyBackgroundComplete(client: any, task: BackgroundTask) {
     `</${tag}>`,
     "</task>",
   ].join("\n")
+  const visibleDescription = task.description
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 160) || "Background task"
+  const visibleStatus = `▣ Background · ${visibleDescription}: ${task.status}`
 
   try {
     let parentAgent = task.parentAgent
@@ -431,13 +437,15 @@ async function notifyBackgroundComplete(client: any, task: BackgroundTask) {
       // Fall back to the invoking agent captured at launch.
     }
     const body = {
-      // Persist hidden context for the parent's next normal turn without spawning
-      // an empty assistant turn, which briefly renders a duplicate model footer.
-      noReply: true,
+      // Start deterministic parent processing. The concise status is visible but
+      // excluded from model context; the full result is model-visible but TUI-hidden.
+      noReply: false,
       ...(parentAgent ? { agent: parentAgent } : {}),
       ...(task.variant ? { variant: task.variant } : {}),
-      // Keep the actionable task ID hidden in the TUI but available to the model.
-      parts: [{ type: "text", synthetic: true, text: notification }],
+      parts: [
+        { type: "text", ignored: true, text: visibleStatus },
+        { type: "text", synthetic: true, text: notification },
+      ],
     }
     await client.session.prompt({
       path: { id: task.parentSessionID },
